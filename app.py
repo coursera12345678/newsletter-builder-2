@@ -5,7 +5,6 @@ from bs4 import BeautifulSoup
 import re
 from groq import Groq
 
-# Load API keys from .streamlit/secrets.toml
 BRAVE_API_KEY = st.secrets["BRAVE_API_KEY"]
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 client = Groq(api_key=GROQ_API_KEY)
@@ -92,19 +91,26 @@ def get_article_text(url):
         resp = requests.get(url, timeout=10)
         soup = BeautifulSoup(resp.text, "html.parser")
         paragraphs = soup.find_all("p")
-        return "\n".join([p.get_text() for p in paragraphs])[:4000]
+        text = "\n".join([p.get_text() for p in paragraphs]).strip()
+        return text[:4000] if text else ""
     except:
         return ""
 
 def summarize_article(content, title):
+    # Always provide *some* context to the LLM
+    if not content:
+        content = f"This article is titled: {title}."
     prompt = f"Summarize the following article titled '{title}' in 5 concise, engaging sentences. Do not start with 'Here is a summary...':\n{content}"
     try:
         completion = client.chat.completions.create(
             model="llama3-70b-8192",
             messages=[{"role": "user", "content": prompt}]
         )
-        return completion.choices[0].message.content.strip()
-    except Exception as e:
+        summary = completion.choices[0].message.content.strip()
+        if not summary or summary.lower().startswith("summary unavailable"):
+            return "Summary unavailable."
+        return summary
+    except Exception:
         return "Summary unavailable."
 
 def generate_intro(titles):
@@ -140,7 +146,6 @@ if submit:
     headlines = []
     article_data = []
 
-    # Gather all info up front for intro and synonym expansion
     for u in urls:
         try:
             resp = requests.get(u, timeout=10)
@@ -171,7 +176,6 @@ if submit:
     intro_text = generate_intro(headlines)
     st.markdown(f"### {intro_text}\n---")
 
-    # Display each article section
     for data in article_data:
         u = data["url"]
         title = data["title"]
@@ -180,8 +184,7 @@ if submit:
         domain = data["domain"]
         keywords = data["keywords"]
 
-        # Quick Reads: related by keywords, from same site, not main article
-        quick_links = brave_search(" ".join(keywords), domain, exclude_urls=all_used_urls | {u}, max_results=6)
+        quick_links = brave_search(" ".join(keywords), domain, exclude_urls=all_used_urls | {u}, max_results=8)
         quick_links = quick_links[:3]
         for link in quick_links:
             all_used_urls.add(link["url"])
@@ -201,13 +204,13 @@ if submit:
 
         st.markdown("---")
 
-    # Recommended Reads: Broaden scope for at least 3 articles
+    # Recommended Reads: escalate aggressively
     from collections import Counter
     most_common_domain = Counter(domains).most_common(1)[0][0] if domains else None
     recommended_links = []
 
     # 1. Try recent from same domain
-    recommended_links += brave_search("", most_common_domain, exclude_urls=all_used_urls, max_results=10)
+    recommended_links += brave_search("", most_common_domain, exclude_urls=all_used_urls, max_results=20)
 
     # 2. If not enough, try synonyms of all main keywords
     if len(recommended_links) < 3:
@@ -216,13 +219,17 @@ if submit:
             all_keywords += data["keywords"]
         synonyms = get_synonyms(all_keywords)
         for syn in synonyms:
-            if len(recommended_links) >= 6:
+            if len(recommended_links) >= 9:
                 break
-            recommended_links += brave_search(syn, most_common_domain, exclude_urls=all_used_urls | {l['url'] for l in recommended_links}, max_results=2)
+            recommended_links += brave_search(syn, most_common_domain, exclude_urls=all_used_urls | {l['url'] for l in recommended_links}, max_results=4)
 
     # 3. If STILL not enough, drop domain restriction for latest tech news
     if len(recommended_links) < 3:
-        recommended_links += brave_search("technology", None, exclude_urls=all_used_urls | {l['url'] for l in recommended_links}, max_results=10)
+        recommended_links += brave_search("technology", None, exclude_urls=all_used_urls | {l['url'] for l in recommended_links}, max_results=20)
+
+    # 4. As a last resort, just fetch any recent articles
+    if len(recommended_links) < 3:
+        recommended_links += brave_search("", None, exclude_urls=all_used_urls | {l['url'] for l in recommended_links}, max_results=20)
 
     # Deduplicate and keep only 3
     seen = set()
