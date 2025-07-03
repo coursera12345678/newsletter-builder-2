@@ -1,115 +1,114 @@
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
-import openai
 from urllib.parse import urlparse
+from groq import Groq
 
-# Groq API setup
-openai.api_key = st.secrets["GROQ_API_KEY"]
-openai.api_base = "https://api.groq.com/openai/v1"
+# Initialize Groq client
+client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
-st.title("📰 Advanced Tech Newsletter Generator")
-st.write("Paste your article URLs (one per line), then click Generate.")
-
-urls_input = st.text_area("Input URLs", height=150)
-submit = st.button("Generate")
-
-@st.cache_data(show_spinner=False)
 def fetch_article_content(url):
     try:
-        res = requests.get(url, timeout=10)
+        res = requests.get(url)
         soup = BeautifulSoup(res.text, "html.parser")
         paragraphs = soup.find_all("p")
-        text = "\n".join(p.get_text() for p in paragraphs)
-        return text.strip()
-    except:
-        return ""
+        return "\n".join(p.text for p in paragraphs)
+    except Exception as e:
+        return f"Failed to fetch article: {e}"
 
-def summarize_article(content):
+def summarize_article(content, title):
+    prompt = f"""
+    Summarize the following article titled '{title}' in a concise and engaging tone. Do not start with 'Here is a summary...'. Limit it to about 5-6 crisp sentences:
+    {content}
+    """
     try:
-        response = openai.ChatCompletion.create(
+        completion = client.chat.completions.create(
             model="llama3-70b-8192",
             messages=[
-                {"role": "user", "content": f"Summarize this article in a short but informative way, suitable for a newsletter. Do not include any extra lines or intros."},
-                {"role": "user", "content": content[:4000]}
+                {"role": "user", "content": prompt}
             ]
         )
-        return response["choices"][0]["message"]["content"].strip()
+        return completion.choices[0].message.content.strip()
     except Exception as e:
-        return f"Summary unavailable. Error: {e}"
+        return f"Summary failed: {e}"
 
-def get_featured_image(url):
+def extract_image(soup):
+    og_img = soup.find("meta", property="og:image")
+    return og_img["content"] if og_img else None
+
+def search_related_articles(query, domain="www.theverge.com"):
+    search_prompt = f"""
+    Find 2 recent articles from {domain} that are related to this topic: '{query}'. For each, return a title and a URL. Avoid TikTok, YouTube or social links.
+    Format: [Title](URL)
+    """
     try:
-        res = requests.get(url, timeout=10)
-        soup = BeautifulSoup(res.text, "html.parser")
-        meta = soup.find("meta", property="og:image")
-        if meta and meta.get("content"):
-            return meta["content"]
+        completion = client.chat.completions.create(
+            model="llama3-70b-8192",
+            messages=[{"role": "user", "content": search_prompt}]
+        )
+        return completion.choices[0].message.content.strip()
     except:
-        pass
-    return None
+        return "(Failed to load related reads.)"
 
-def extract_title(url):
-    try:
-        res = requests.get(url, timeout=10)
-        soup = BeautifulSoup(res.text, "html.parser")
-        return soup.title.string.strip()
-    except:
-        return "Title Unavailable"
+def generate_intro(headlines):
+    joined = ", ".join(headlines)
+    return f"Hi there! This week’s newsletter covers: {joined}. Dive in below!"
 
-def search_related(topic, domain):
-    try:
-        search_query = f"site:{domain} {topic}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(f"https://www.google.com/search?q={search_query}", headers=headers)
-        soup = BeautifulSoup(res.text, "html.parser")
-        links = []
-        for g in soup.find_all("div", class_="tF2Cxc"):
-            title_elem = g.find("h3")
-            link_elem = g.find("a")
-            if title_elem and link_elem:
-                links.append((title_elem.get_text(), link_elem["href"]))
-        return links[:3]
-    except:
-        return []
+st.set_page_config(page_title="📰 Advanced Tech Newsletter Generator")
+st.title("📰 Advanced Tech Newsletter Generator")
 
-if submit and urls_input:
-    urls = urls_input.strip().split("\n")
+st.markdown("Paste your article URLs (one per line), then click Generate.")
+urls_input = st.text_area("Input URLs")
+submit = st.button("Generate Newsletter")
 
-    st.markdown("### Intro")
-    st.write("Hi there! This week’s newsletter covers key updates: " + ", ".join([extract_title(u) for u in urls]))
+if submit:
+    urls = [u.strip() for u in urls_input.split("\n") if u.strip()]
+    headlines = []
+    sections = []
 
     for u in urls:
-        with st.spinner(f"🔍 Fetching: {u}"):
-            content = fetch_article_content(u)
-            if not content:
-                st.warning(f"Failed to process {u}: Empty content")
-                continue
-            title = extract_title(u)
-            image = get_featured_image(u)
-            summary = summarize_article(content)
+        try:
+            st.markdown(f"🔍 Fetching: {u}")
+            res = requests.get(u)
+            soup = BeautifulSoup(res.text, "html.parser")
+            title = soup.find("title").text.strip()
+            content = "\n".join(p.text for p in soup.find_all("p"))
+            summary = summarize_article(content, title)
+            image_url = extract_image(soup)
+            related = search_related_articles(title, urlparse(u).netloc)
 
-            st.markdown(f"## {title}")
-            if image:
-                st.image(image, use_container_width=True)
+            headlines.append(title)
 
-            st.write(summary)
-            st.markdown(f"[Continue Reading →]({u})")
+            section = f"""
+            <h2>{title}</h2>
+            <img src="{image_url}" style="width:100%; border-radius: 12px;"/>
+            <p>{summary}</p>
+            <p><a href="{u}" target="_blank"><b>Continue Reading →</b></a></p>
+            <div style="margin-top:10px; padding:10px; background-color:#f0f4f8; border-left:4px solid #1e88e5;">
+                <b>Quick Reads from this article:</b><br>
+                {related}
+            </div>
+            <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
+            """
+            sections.append(section)
 
-            # Quick Reads
-            related = search_related(title, urlparse(u).netloc)
-            if related:
-                st.markdown("**Quick Reads from this Article**")
-                for rt, rl in related:
-                    st.markdown(f"- [{rt}]({rl})")
+        except Exception as e:
+            st.error(f"Failed to process {u}: {e}")
 
-            st.markdown("---")
+    if sections:
+        intro = generate_intro(headlines)
+        st.markdown("## ✨ Newsletter Preview:")
+        st.markdown(f"<p>{intro}</p>", unsafe_allow_html=True)
+        for s in sections:
+            st.markdown(s, unsafe_allow_html=True)
 
-    # Recommended Reads (placeholder logic: gather similar articles)
-    st.markdown("### 📚 Recommended Reads")
-    for u in urls:
-        title = extract_title(u)
-        domain = urlparse(u).netloc
-        related = search_related(title, domain)
-        for rt, rl in related:
-            st.markdown(f"- [{rt}]({rl})")
+        # Final recommended section
+        try:
+            final_summ = search_related_articles(
+                f"{', '.join(headlines)}",
+                domain="www.theverge.com"
+            )
+            st.markdown("<h3>🔗 Recommended Reads</h3>", unsafe_allow_html=True)
+            st.markdown(final_summ, unsafe_allow_html=True)
+        except:
+            pass
