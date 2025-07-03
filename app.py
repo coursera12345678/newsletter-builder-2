@@ -4,7 +4,6 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from groq import Groq
 
-# Initialize Groq client
 client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
 def fetch_article_content(url):
@@ -37,14 +36,13 @@ def extract_image(soup):
     return og_img["content"] if og_img else None
 
 def get_root_domain(url):
-    # Returns 'theverge.com' for 'www.theverge.com'
     netloc = urlparse(url).netloc
     parts = netloc.split('.')
     if len(parts) >= 2:
         return '.'.join(parts[-2:])
     return netloc
 
-def search_related_articles(query, domain):
+def get_related_articles(query, domain, exclude_urls=None, min_results=2):
     api_key = st.secrets["NEWSAPI_KEY"]
     endpoint = "https://newsapi.org/v2/everything"
     params = {
@@ -52,24 +50,55 @@ def search_related_articles(query, domain):
         "domains": domain,
         "language": "en",
         "sortBy": "relevancy",
-        "pageSize": 2,
+        "pageSize": 5,  # Fetch more for filtering
         "apiKey": api_key
     }
     try:
         response = requests.get(endpoint, params=params, timeout=8)
         if response.status_code == 200:
             results = response.json().get("articles", [])
-            if not results:
-                return "(No related articles found.)"
-            links = [
-                f"[{item['title']}]({item['url']})"
-                for item in results
-            ]
-            return "<br>".join(links) if links else "(No related articles found.)"
+            links = []
+            for item in results:
+                if exclude_urls and item['url'] in exclude_urls:
+                    continue
+                links.append(f"[{item['title']}]({item['url']})")
+                if len(links) >= min_results:
+                    break
+            # Fallback: If not enough related, fill with latest from site
+            if len(links) < min_results:
+                links += get_latest_articles(domain, exclude_urls, min_results - len(links))
+            return "<br>".join(links) if links else "(No articles available on this site.)"
         else:
-            return f"(Failed to fetch related articles: {response.text})"
+            return f"(Failed to fetch articles: {response.text})"
     except Exception as e:
-        return f"(Failed to load related reads: {e})"
+        return f"(Failed to load articles: {e})"
+
+def get_latest_articles(domain, exclude_urls=None, count=2):
+    api_key = st.secrets["NEWSAPI_KEY"]
+    endpoint = "https://newsapi.org/v2/everything"
+    params = {
+        "domains": domain,
+        "language": "en",
+        "sortBy": "publishedAt",
+        "pageSize": max(5, count),
+        "apiKey": api_key
+    }
+    try:
+        response = requests.get(endpoint, params=params, timeout=8)
+        if response.status_code == 200:
+            results = response.json().get("articles", [])
+            links = []
+            for item in results:
+                if exclude_urls and item['url'] in exclude_urls:
+                    continue
+                links.append(f"[{item['title']}]({item['url']})")
+                if len(links) >= count:
+                    break
+            return links
+        else:
+            return []
+    except Exception:
+        return []
 
 def generate_intro(headlines):
     joined = ", ".join(headlines)
@@ -87,6 +116,9 @@ if submit:
     headlines = []
     sections = []
     domains = []
+    url_set = set(urls)
+
+    article_urls_per_domain = {}
 
     for u in urls:
         try:
@@ -99,7 +131,10 @@ if submit:
             image_url = extract_image(soup)
             domain = get_root_domain(u)
             domains.append(domain)
-            related = search_related_articles(title, domain)
+            # Track all main article URLs per domain to exclude from recommendations
+            article_urls_per_domain.setdefault(domain, set()).add(u)
+            # Related articles from same domain, using title as query, excluding this article
+            related = get_related_articles(title, domain, exclude_urls={u}, min_results=2)
 
             headlines.append(title)
 
@@ -126,13 +161,14 @@ if submit:
         for s in sections:
             st.markdown(s, unsafe_allow_html=True)
 
-        # Final recommended section: use the most common domain
+        # Final recommended section: show latest stories from the most common domain, excluding main articles
         try:
             from collections import Counter
             most_common_domain = Counter(domains).most_common(1)[0][0] if domains else None
-            if most_common_domain:
-                final_summ = search_related_articles(f"{', '.join(headlines)}", most_common_domain)
+            exclude_urls = article_urls_per_domain.get(most_common_domain, set())
+            recommended_links = get_latest_articles(most_common_domain, exclude_urls=exclude_urls, count=3)
+            if recommended_links:
                 st.markdown("<h3>🔗 Recommended Reads</h3>", unsafe_allow_html=True)
-                st.markdown(final_summ, unsafe_allow_html=True)
-        except:
-            pass
+                st.markdown("<br>".join(recommended_links), unsafe_allow_html=True)
+        except Exception as e:
+            st.error(f"Failed to fetch recommended reads: {e}")
