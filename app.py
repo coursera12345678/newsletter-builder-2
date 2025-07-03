@@ -1,113 +1,94 @@
 import streamlit as st
 import requests
+from newspaper import Article
 from bs4 import BeautifulSoup
-import os
 
-# --- Configuration ---
-GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+# -- Config --
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-HEADERS = {
-    "Authorization": f"Bearer {GROQ_API_KEY}",
-    "Content-Type": "application/json"
-}
+GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 
-# --- Functions ---
-def extract_article_text(url):
+# -- Function to extract article content --
+def extract_article_content(url):
     try:
-        res = requests.get(url)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        paragraphs = soup.find_all('p')
-        text = ' '.join([p.get_text() for p in paragraphs])
-        return text[:8000]  # Groq input size limit
-    except:
-        return ""
+        article = Article(url)
+        article.download()
+        article.parse()
+        return article.title, article.text
+    except Exception as e:
+        return "", f"⚠️ Error extracting article: {e}"
 
-def get_groq_summary(text, prompt):
+# -- Function to summarize with Groq --
+def summarize_with_groq(text):
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
     payload = {
         "model": "llama3-70b-8192",
         "messages": [
             {"role": "system", "content": "You are a helpful newsletter assistant."},
-            {"role": "user", "content": f"{prompt}\n\n{text}"}
+            {"role": "user", "content": f"Summarize this article like it's a newsletter section. Make it clear and engaging: {text}"}
         ]
     }
     try:
-        res = requests.post(GROQ_URL, headers=HEADERS, json=payload)
+        res = requests.post(GROQ_URL, headers=headers, json=payload)
         res.raise_for_status()
         data = res.json()
-        return data["choices"][0]["message"]["content"].strip()
+        return data["choices"][0]["message"]["content"]
     except Exception as e:
         return f"⚠️ Error generating summary: {e}"
 
-def generate_newsletter(urls):
-    sections = {
-        "main_story": "",
-        "other_stories": [],
-        "quick_reads": [],
-        "recommended_reads": []
-    }
+# -- UI --
+st.title("📰 Auto Newsletter Generator (Groq + Streamlit)")
+st.markdown("Paste article URLs below (one per line), then click Summarize.")
+
+urls_input = st.text_area("Article URLs", height=200)
+if st.button("Summarize") and urls_input:
+    urls = [u.strip() for u in urls_input.split("\n") if u.strip()]
+    summaries = []
 
     for idx, url in enumerate(urls):
-        article_text = extract_article_text(url)
+        st.write(f"\n\n🔍 Fetching: {url}")
+        title, content = extract_article_content(url)
+        if content.startswith("⚠️"):
+            summaries.append({"title": "Error", "summary": content, "url": url})
+            continue
 
-        if idx == 0:
-            prompt = "Summarize this as a main newsletter story. Start with a short engaging headline, followed by a paragraph summary."
-            summary = get_groq_summary(article_text, prompt)
-            sections["main_story"] = summary
+        st.write("✍️ Summarizing...")
+        summary = summarize_with_groq(content)
+        summaries.append({"title": title, "summary": summary, "url": url})
 
-        elif idx < 3:
-            prompt = "Summarize this as a short sub-story for a newsletter. Start with a short headline, followed by 2-3 lines of summary."
-            summary = get_groq_summary(article_text, prompt)
-            sections["other_stories"].append(summary)
+    # -- Render Newsletter Format --
+    st.markdown("---")
+    st.markdown("## 🗞️ Your Newsletter Preview")
 
-        elif idx < 6:
-            prompt = "Summarize this article in one catchy sentence for a quick read section."
-            summary = get_groq_summary(article_text, prompt)
-            sections["quick_reads"].append(f"- {summary} [Read more]({url})")
+    # MAIN ARTICLE
+    main_title = summaries[0]["title"]
+    main_summary = summaries[0]["summary"]
+    main_url = summaries[0]["url"]
 
-        else:
-            sections["recommended_reads"].append(f"- [Read here]({url})")
+    st.markdown(f"""
+    <h1 style="font-size: 28px;">{main_title}</h1>
+    <p style="font-size: 18px;">{main_summary}</p>
+    <p><a href="{main_url}" target="_blank">Read more →</a></p>
+    """, unsafe_allow_html=True)
 
-    return sections
-
-# --- Streamlit App ---
-st.set_page_config(page_title="Auto Newsletter Generator", layout="wide")
-st.title("📰 Auto Newsletter Generator (Groq + Streamlit)")
-
-urls_input = st.text_area("Paste article URLs below (one per line), then click Summarize.")
-
-if st.button("Summarize"):
-    urls = [url.strip() for url in urls_input.split('\n') if url.strip()]
-    if urls:
-        with st.spinner("Generating newsletter..."):
-            newsletter = generate_newsletter(urls)
-
-        # --- Display Styled Output ---
-        st.markdown("""
-        <style>
-            .main-headline { font-size: 28px; font-weight: bold; margin-bottom: 0.5em; color: #222; }
-            .subheadline { font-size: 20px; font-weight: bold; margin-top: 1em; color: #444; }
-            .paragraph { font-size: 16px; color: #333; line-height: 1.6; margin-bottom: 1em; }
-            ul { padding-left: 1.2em; }
-            li { margin-bottom: 0.5em; }
-        </style>
-        """, unsafe_allow_html=True)
-
+    # SUB-ARTICLES
+    st.markdown('<div class="subheadline" style="font-size: 22px; margin-top: 2em;">Other Top Stories</div>', unsafe_allow_html=True)
+    for item in summaries[1:]:
         st.markdown(f"""
-        <div class="main-headline">{newsletter['main_story'].splitlines()[0]}</div>
-        <div class="paragraph">{' '.join(newsletter['main_story'].splitlines()[1:])}</div>
-
-        <div class="subheadline">Other Top Stories</div>
-        {''.join([f'<div class="paragraph">{story}</div>' for story in newsletter['other_stories']])}
-
-        <div class="subheadline">Quick Reads</div>
-        <ul>
-        {''.join([f'<li>{qr}</li>' for qr in newsletter['quick_reads']])}
-        </ul>
-
-        <div class="subheadline">Recommended Reads</div>
-        <ul>
-        {''.join([f'<li>{rec}</li>' for rec in newsletter['recommended_reads']])}
-        </ul>
+        <p><b>{item["title"]}</b><br>{item["summary"]}<br>
+        <a href="{item["url"]}" target="_blank">Read more →</a></p>
         """, unsafe_allow_html=True)
-    else:
-        st.warning("Please enter at least one URL.")
+
+    # QUICK READS
+    st.markdown('<div class="subheadline" style="font-size: 22px; margin-top: 2em;">Quick Reads</div><ul>', unsafe_allow_html=True)
+    for item in summaries:
+        st.markdown(f"""<li><a href="{item["url"]}" target="_blank">{item["title"]}</a></li>""", unsafe_allow_html=True)
+    st.markdown('</ul>', unsafe_allow_html=True)
+
+    # RECOMMENDED READS
+    st.markdown('<div class="subheadline" style="font-size: 22px; margin-top: 2em;">Recommended Reads</div><ul>', unsafe_allow_html=True)
+    for item in summaries:
+        st.markdown(f"""<li><a href="{item["url"]}" target="_blank">{item["title"]}</a></li>""", unsafe_allow_html=True)
+    st.markdown('</ul>', unsafe_allow_html=True)
