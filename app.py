@@ -98,7 +98,6 @@ def get_article_text(url):
         return ""
 
 def summarize_article(content, title):
-    # Always provide *some* context to the LLM
     if not content:
         content = f"This article is titled: {title}."
     prompt = (
@@ -111,7 +110,6 @@ def summarize_article(content, title):
             messages=[{"role": "user", "content": prompt + "\n" + content}]
         )
         summary = completion.choices[0].message.content.strip()
-        # Remove any divider lines or "Best---" etc
         summary = re.sub(r"^[-=]{2,}.*$", "", summary, flags=re.MULTILINE).strip()
         summary = re.sub(r"^Best.*$", "", summary, flags=re.MULTILINE).strip()
         return summary if summary else "Summary unavailable."
@@ -131,7 +129,6 @@ def generate_intro(titles):
             messages=[{"role": "user", "content": prompt}]
         )
         intro = completion.choices[0].message.content.strip()
-        # Remove any divider lines or "Best---" etc
         intro = re.sub(r"^[-=]{2,}.*$", "", intro, flags=re.MULTILINE).strip()
         intro = re.sub(r"^Best.*$", "", intro, flags=re.MULTILINE).strip()
         return intro
@@ -154,6 +151,7 @@ if submit:
     domains = []
     headlines = []
     article_data = []
+    all_quick_links_urls = set()  # For deduplication in recommendations only
 
     for u in urls:
         try:
@@ -186,11 +184,6 @@ if submit:
     st.markdown(f'<p style="font-size:0.95em;">{intro_text}</p>', unsafe_allow_html=True)
     st.markdown("---")
 
-    # For deduplication of recommendations only
-    rec_used_urls = set()
-    # For quick links, deduplicate only against main article and itself
-    quick_links_all = []
-
     for data in article_data:
         u = data["url"]
         title = data["title"]
@@ -199,7 +192,7 @@ if submit:
         domain = data["domain"]
         keywords = data["keywords"]
 
-        # Quick Reads: deduplicate only against this article and its quick links
+        # Quick Reads: deduplicate only within this article (never globally)
         quick_links = brave_search(
             " ".join(keywords),
             domain,
@@ -215,7 +208,8 @@ if submit:
                 seen_quick.add(link["url"])
             if len(filtered_quick_links) == 3:
                 break
-        quick_links_all.extend([l["url"] for l in filtered_quick_links])
+        # Add to the global set for rec deduplication
+        all_quick_links_urls.update([l["url"] for l in filtered_quick_links])
 
         st.markdown(f"## {title}")
         if image_url:
@@ -233,7 +227,7 @@ if submit:
         st.markdown("---")
 
     # After all quick links, update all_used_urls to prevent overlap with recommendations
-    all_used_urls.update(quick_links_all)
+    all_used_urls.update(all_quick_links_urls)
 
     # Recommended Reads: escalate aggressively
     from collections import Counter
