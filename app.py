@@ -2,121 +2,114 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import os
-import re
+import json
 
-st.set_page_config(page_title="📰 Auto Newsletter Generator")
-st.title("📰 Auto Newsletter Generator (Groq + Streamlit)")
-st.write("Paste article URLs below (one per line), then click Summarize.")
+# Load API key from secrets
+groq_api_key = st.secrets["GROQ_API_KEY"]
+groq_api_url = "https://api.groq.com/openai/v1/chat/completions"
 
-# Input box
-urls_input = st.text_area("Article URLs", height=200)
-
-# API Key
-GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-
-def extract_text(url):
+def fetch_article_text(url):
     try:
         response = requests.get(url, timeout=10)
-        soup = BeautifulSoup(response.content, "html.parser")
+        soup = BeautifulSoup(response.text, 'html.parser')
+        paragraphs = soup.find_all('p')
+        text = ' '.join(p.get_text() for p in paragraphs)
+        return text.strip()
+    except Exception as e:
+        return f"Error fetching article: {e}"
 
-        paragraphs = soup.find_all("p")
-        text = " ".join(p.get_text() for p in paragraphs)
-        title_tag = soup.find("title")
-        title = title_tag.get_text().strip() if title_tag else "Untitled"
-        return title, text.strip()
-    except:
-        return None, None
-
-def extract_image(url):
-    try:
-        response = requests.get(url, timeout=10)
-        soup = BeautifulSoup(response.content, "html.parser")
-        og_image = soup.find("meta", property="og:image")
-        if og_image and og_image["content"]:
-            return og_image["content"]
-    except:
-        pass
-    return None
-
-def summarize_with_groq(content, style):
-    if style == "main":
-        prompt = "Write a bold headline and 3-line intro for a newsletter's main story."
-    elif style == "sub":
-        prompt = "Write a short 2-3 line summary of this article for the 'Other Top Stories' section."
-    elif style == "quick":
-        prompt = "Give a short one-line news summary."
-    elif style == "recommended":
-        prompt = "Write a teaser line recommending this article to curious readers."
-
+def summarize_with_groq(text, prompt):
     headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Authorization": f"Bearer {groq_api_key}",
         "Content-Type": "application/json"
     }
-    data = {
+    body = {
+        "model": "llama3-70b-8192",
         "messages": [
-            {"role": "system", "content": "You are a helpful newsletter editor."},
-            {"role": "user", "content": prompt + "\n\n" + content}
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": text}
         ],
-        "model": "mixtral-8x7b-32768"
+        "temperature": 0.7
     }
-    res = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=data)
-    return res.json()["choices"][0]["message"]["content"].strip()
+    try:
+        res = requests.post(groq_api_url, headers=headers, data=json.dumps(body))
+        res.raise_for_status()
+        return res.json()['choices'][0]['message']['content']
+    except Exception as e:
+        return f"Error: {e}"
+
+def format_newsletter(main_article, sub_articles, quick_reads, recommended_reads):
+    html = f"""
+    <div style="font-family:sans-serif; max-width:600px; margin:auto;">
+      <h1 style="color:#333;">📰 Weekly Tech Digest</h1>
+
+      <h2 style="color:#444;">{main_article['title']}</h2>
+      <p>{main_article['summary']}</p>
+
+      <h3 style="margin-top:2em; color:#666;">Other Top Stories</h3>
+      {''.join(f'<p><b>{a["title"]}</b><br>{a["summary"]}</p>' for a in sub_articles)}
+
+      <h3 style="margin-top:2em; color:#666;">Quick Reads</h3>
+      <ul>
+        {''.join(f'<li><a href="{r["url"]}" target="_blank">{r["title"]}</a></li>' for r in quick_reads)}
+      </ul>
+
+      <h3 style="margin-top:2em; color:#666;">Recommended Reads</h3>
+      <ul>
+        {''.join(f'<li><a href="{r["url"]}" target="_blank">{r["title"]}</a></li>' for r in recommended_reads)}
+      </ul>
+    </div>
+    """
+    return html
+
+st.title("📰 Auto Newsletter Generator (Groq + Streamlit)")
+st.markdown("Paste article URLs below (one per line), then click Summarize.")
+
+urls_input = st.text_area("Article URLs", height=200)
 
 if st.button("Summarize"):
     urls = [url.strip() for url in urls_input.splitlines() if url.strip()]
+    if not urls:
+        st.warning("Please enter at least one URL.")
+    else:
+        summaries = []
+        quick_reads = []
+        recommended_reads = []
 
-    main_story = {}
-    other_stories = []
-    quick_reads = []
-    recommended_reads = []
+        for i, url in enumerate(urls):
+            st.write(f"🔍 Fetching: {url}")
+            article_text = fetch_article_text(url)
 
-    for i, url in enumerate(urls):
-        st.write(f"\U0001F50D Fetching: {url}")
-        title, text = extract_text(url)
-        image = extract_image(url)
-        if not text:
-            continue
+            if "Error" in article_text:
+                st.error(article_text)
+                continue
 
-        if i == 0:
-            summary = summarize_with_groq(text, "main")
-            main_story = {"title": title, "summary": summary, "image": image, "url": url}
-        elif i == 1:
-            summary = summarize_with_groq(text, "sub")
-            other_stories.append({"title": title, "summary": summary, "url": url})
-        else:
-            quick = summarize_with_groq(text, "quick")
-            rec = summarize_with_groq(text, "recommended")
-            quick_reads.append({"title": title, "summary": quick, "url": url})
-            recommended_reads.append({"summary": rec, "url": url})
+            prompt = """
+            You are a newsletter editor. Summarize the following news article in 2-3 crisp, engaging sentences suitable for a tech-savvy audience. Include key takeaways, and maintain a friendly, concise tone. If it's the first article, treat it as the main headline.
+            """
+            summary = summarize_with_groq(article_text, prompt)
 
-    # Construct HTML output
-    html = '<div style="font-family:sans-serif; max-width:600px; margin:auto;">
-'
-    
-    if main_story:
-        html += f"<h1>{main_story['title']}</h1>"
-        if main_story.get("image"):
-            html += f'<img src="{main_story['image']}" alt="Main image" style="width:100%; border-radius:8px; margin:10px 0;" />'
-        html += f"<p>{main_story['summary']}</p>"
+            # Create fallback title if Groq failed
+            try:
+                title = article_text.split('.')[0][:100] + '...'
+            except:
+                title = "Untitled Article"
 
-    if other_stories:
-        html += "<h3>Other Top Stories</h3>"
-        for story in other_stories:
-            html += f"<p><strong>{story['title']}</strong><br>{story['summary']}</p>"
+            summaries.append({
+                "title": f"Article {i+1}" if not summary else title,
+                "summary": summary,
+                "url": url
+            })
 
-    if quick_reads:
-        html += "<h3>Quick Reads</h3><ul>"
-        for qr in quick_reads:
-            html += f'<li><a href="{qr["url"]}">{qr["title"]}</a> — {qr["summary"]}</li>'
-        html += "</ul>"
+        if summaries:
+            main_article = summaries[0]
+            sub_articles = summaries[1:3]
+            quick_reads = summaries[3:5] if len(summaries) > 3 else []
+            recommended_reads = summaries[5:] if len(summaries) > 5 else []
 
-    if recommended_reads:
-        html += "<h3>Recommended Reads</h3><ul>"
-        for rec in recommended_reads:
-            html += f'<li><a href="{rec["url"]}">{rec["summary"]}</a></li>'
-        html += "</ul>"
+            newsletter_html = format_newsletter(main_article, sub_articles, quick_reads, recommended_reads)
+            st.markdown("""### 📄 Newsletter Preview (HTML):""")
+            st.components.v1.html(newsletter_html, height=800, scrolling=True)
 
-    html += "</div>"
-    
-    st.markdown("""---\n### ✨ Newsletter Preview (HTML):""")
-    st.markdown(html, unsafe_allow_html=True)
+            with st.expander("📋 View Raw HTML"):
+                st.code(newsletter_html, language='html')
