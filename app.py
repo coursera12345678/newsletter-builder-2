@@ -36,26 +36,27 @@ def extract_image(soup):
     og_img = soup.find("meta", property="og:image")
     return og_img["content"] if og_img else None
 
-# --- Use Bing News Search for real, working links ---
-def search_related_articles(query, domain="www.theverge.com"):
-    api_key = st.secrets["BING_API_KEY"]
-    endpoint = "https://api.bing.microsoft.com/v7.0/news/search"
+# --- Use NewsAPI.org for real, working links ---
+def search_related_articles(query, domain="theverge.com"):
+    api_key = st.secrets["NEWSAPI_KEY"]
+    endpoint = "https://newsapi.org/v2/everything"
     params = {
-        "q": f"site:{domain} {query}",
-        "count": 2,
-        "mkt": "en-US"
+        "q": query,
+        "domains": domain,
+        "language": "en",
+        "sortBy": "publishedAt",
+        "pageSize": 2,
+        "apiKey": api_key
     }
-    headers = {"Ocp-Apim-Subscription-Key": api_key}
     try:
-        response = requests.get(endpoint, headers=headers, params=params, timeout=8)
+        response = requests.get(endpoint, params=params, timeout=8)
         if response.status_code == 200:
-            results = response.json().get("value", [])
+            results = response.json().get("articles", [])
             if not results:
                 return "(No related articles found.)"
             links = [
-                f"[{item['name']}]({item['url']})"
+                f"[{item['title']}]({item['url']})"
                 for item in results
-                if domain in item['url']
             ]
             return "<br>".join(links) if links else "(No related articles found.)"
         else:
@@ -120,7 +121,7 @@ if submit:
         try:
             final_summ = search_related_articles(
                 f"{', '.join(headlines)}",
-                domain="www.theverge.com"
+                domain="theverge.com"
             )
             st.markdown("<h3>🔗 Recommended Reads</h3>", unsafe_allow_html=True)
             st.markdown(final_summ, unsafe_allow_html=True)
