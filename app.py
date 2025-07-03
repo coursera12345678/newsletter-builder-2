@@ -3,8 +3,11 @@ import requests
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 import re
+from groq import Groq
 
 BRAVE_API_KEY = st.secrets["BRAVE_API_KEY"]
+GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+client = Groq(api_key=GROQ_API_KEY)
 
 def get_root_domain(url):
     netloc = urlparse(url).netloc
@@ -24,7 +27,7 @@ def extract_keywords(title, max_keywords=4):
     keywords = sorted(keywords, key=len, reverse=True)
     return " ".join(keywords[:max_keywords]) if keywords else title
 
-def brave_search(query, domain, exclude_urls=None, max_results=5):
+def brave_search(query, domain, exclude_urls=None, max_results=10):
     url = "https://api.search.brave.com/res/v1/web/search"
     headers = {"Accept": "application/json", "X-Subscription-Token": BRAVE_API_KEY}
     params = {"q": f"site:{domain} {query}", "count": max_results}
@@ -48,13 +51,32 @@ def get_article_image(url):
         og_img = soup.find("meta", property="og:image")
         if og_img and og_img.get("content"):
             return og_img["content"]
-        # fallback: first image in article
         img = soup.find("img")
         if img and img.get("src"):
             return img["src"]
     except:
         pass
     return None
+
+def get_article_text(url):
+    try:
+        resp = requests.get(url, timeout=10)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        paragraphs = soup.find_all("p")
+        return "\n".join([p.get_text() for p in paragraphs])[:4000]
+    except:
+        return ""
+
+def summarize_article(content, title):
+    prompt = f"Summarize the following article titled '{title}' in 5 concise, engaging sentences. Do not start with 'Here is a summary...':\n{content}"
+    try:
+        completion = client.chat.completions.create(
+            model="llama3-70b-8192",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return completion.choices[0].message.content.strip()
+    except Exception as e:
+        return "Summary unavailable."
 
 st.set_page_config(page_title="📰 Advanced Tech Newsletter Generator")
 st.title("📰 Advanced Tech Newsletter Generator")
@@ -68,7 +90,6 @@ if submit:
     all_used_urls = set(urls)
     domains = []
     headlines = []
-    sections = []
 
     for u in urls:
         try:
@@ -76,9 +97,12 @@ if submit:
             soup = BeautifulSoup(resp.text, "html.parser")
             title = soup.title.string.strip() if soup.title else u
             image_url = get_article_image(u)
+            article_text = get_article_text(u)
+            summary = summarize_article(article_text, title)
         except Exception:
             title = u
             image_url = None
+            summary = "Summary unavailable."
 
         headlines.append(title)
         domain = get_root_domain(u)
@@ -86,13 +110,15 @@ if submit:
         keywords = extract_keywords(title)
 
         # Quick Reads: related by keywords, from same site, not main article
-        quick_links = brave_search(keywords, domain, exclude_urls=all_used_urls | {u}, max_results=3)
+        quick_links = brave_search(keywords, domain, exclude_urls=all_used_urls | {u}, max_results=6)
+        quick_links = quick_links[:3]
         for link in quick_links:
             all_used_urls.add(link["url"])
 
         st.markdown(f"## {title}")
         if image_url:
-            st.image(image_url, use_column_width=True)
+            st.image(image_url, use_container_width=True)
+        st.markdown(f"{summary}")
         st.markdown(f"[Continue Reading →]({u})")
 
         st.markdown("**Quick Reads from this article:**")
@@ -107,7 +133,8 @@ if submit:
     # Recommended Reads: recent articles from the most common domain, not already used
     from collections import Counter
     most_common_domain = Counter(domains).most_common(1)[0][0] if domains else None
-    recommended_links = brave_search("", most_common_domain, exclude_urls=all_used_urls, max_results=3)
+    recommended_links = brave_search("", most_common_domain, exclude_urls=all_used_urls, max_results=10)
+    recommended_links = recommended_links[:3]
     st.markdown("### 🔗 Recommended Reads")
     if recommended_links:
         for link in recommended_links:
