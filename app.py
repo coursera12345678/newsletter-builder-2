@@ -51,7 +51,7 @@ def search_related_articles(query, domain):
         "q": query,
         "domains": domain,
         "language": "en",
-        "sortBy": "publishedAt",
+        "sortBy": "relevancy",
         "pageSize": 2,
         "apiKey": api_key
     }
