@@ -5,7 +5,6 @@ from bs4 import BeautifulSoup
 import re
 from groq import Groq
 
-# Load API keys from .streamlit/secrets.toml
 BRAVE_API_KEY = st.secrets["BRAVE_API_KEY"]
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 client = Groq(api_key=GROQ_API_KEY)
@@ -184,7 +183,7 @@ if submit:
     st.markdown(f'<p style="font-size:0.95em;">{intro_text}</p>', unsafe_allow_html=True)
     st.markdown("---")
 
-    for idx, data in enumerate(article_data):
+    for data in article_data:
         u = data["url"]
         title = data["title"]
         image_url = data["image_url"]
@@ -192,10 +191,13 @@ if submit:
         domain = data["domain"]
         keywords = data["keywords"]
 
-        # Quick Reads: try keywords, then broaden if needed
+        # Foolproof Quick Reads: try keywords, then broaden to site, then global if needed
         quick_links = brave_search(" ".join(keywords), domain, exclude_urls={u}, max_results=8)
         if len(quick_links) < 3:
             quick_links += brave_search("", domain, exclude_urls={u} | {l['url'] for l in quick_links}, max_results=8)
+        if len(quick_links) < 3:
+            quick_links += brave_search(" ".join(keywords), None, exclude_urls={u} | {l['url'] for l in quick_links}, max_results=8)
+        # Deduplicate only within this article's quick links
         filtered_quick_links = []
         seen_quick = set()
         for link in quick_links:
@@ -205,9 +207,6 @@ if submit:
             if len(filtered_quick_links) == 3:
                 break
         all_quick_links_urls.update([l["url"] for l in filtered_quick_links])
-
-        # Debug output to see what Brave returns
-        st.markdown(f"<details><summary>Debug: Quick Reads URLs for article {idx+1}</summary><pre>{[l['url'] for l in quick_links]}</pre></details>", unsafe_allow_html=True)
 
         st.markdown(f"## {title}")
         if image_url:
