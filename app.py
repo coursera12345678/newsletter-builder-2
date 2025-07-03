@@ -1,122 +1,65 @@
 import streamlit as st
 import requests
 from urllib.parse import urlparse
-import re
+from groq import Groq
 
-GNEWS_API_KEY = st.secrets["GNEWS_API_KEY"]
+client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+BRAVE_API_KEY = st.secrets["BRAVE_API_KEY"]
 
 def get_root_domain(url):
     netloc = urlparse(url).netloc
     parts = netloc.split('.')
     return '.'.join(parts[-2:]) if len(parts) >= 2 else netloc
 
-def extract_keywords(title, max_keywords=4):
-    stopwords = set([
-        "the", "and", "for", "but", "with", "from", "this", "that", "have", "has", "will", "are",
-        "was", "its", "his", "her", "their", "our", "your", "about", "into", "over", "plus", "just",
-        "more", "than", "now", "out", "new", "all", "can", "see", "get", "got", "off", "on", "in",
-        "to", "of", "by", "as", "at", "is", "it", "be", "or", "an", "a", "so", "up", "back", "for",
-        "not", "you", "we", "he", "she", "they", "his", "her", "our", "their", "your", "my", "me", "i"
-    ])
-    words = re.findall(r'\b\w+\b', title.lower())
-    keywords = [w for w in words if w not in stopwords and len(w) > 3]
-    keywords = sorted(keywords, key=len, reverse=True)
-    return " ".join(keywords[:max_keywords]) if keywords else title
-
-def gnews_search(query, domain, exclude_urls=None, max_results=5):
-    url = f"https://gnews.io/api/v4/search"
-    params = {
-        "q": query,
-        "token": GNEWS_API_KEY,
-        "lang": "en",
-        "max": max_results,
-        "site": domain
-    }
-    resp = requests.get(url, params=params)
+def brave_search(query, domain, max_results=3):
+    url = "https://api.search.brave.com/res/v1/web/search"
+    headers = {"Accept": "application/json", "X-Subscription-Token": BRAVE_API_KEY}
+    params = {"q": f"site:{domain} {query}", "count": max_results}
+    resp = requests.get(url, headers=headers, params=params)
     results = []
     if resp.status_code == 200:
         data = resp.json()
-        for article in data.get("articles", []):
-            if exclude_urls and article["url"] in exclude_urls:
-                continue
-            results.append((article["title"], article["url"]))
+        for item in data.get("web", {}).get("results", []):
+            results.append((item["title"], item["url"]))
     return results
 
-def gnews_latest(domain, exclude_urls=None, max_results=5):
-    url = f"https://gnews.io/api/v4/top-headlines"
-    params = {
-        "token": GNEWS_API_KEY,
-        "lang": "en",
-        "max": max_results,
-        "site": domain
-    }
-    resp = requests.get(url, params=params)
-    results = []
-    if resp.status_code == 200:
-        data = resp.json()
-        for article in data.get("articles", []):
-            if exclude_urls and article["url"] in exclude_urls:
-                continue
-            results.append((article["title"], article["url"]))
-    return results
+def summarize_text(text, title):
+    prompt = f"Summarize the following article titled '{title}' in 5 concise sentences:\n\n{text}"
+    completion = client.chat.completions.create(
+        model="llama3-70b-8192",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return completion.choices[0].message.content.strip()
 
-st.set_page_config(page_title="📰 Advanced Tech Newsletter Generator")
-st.title("📰 Advanced Tech Newsletter Generator")
+st.title("📰 Newsletter Generator with Groq + Brave Search")
 
-st.markdown("Paste your article URLs (one per line), then click Generate.")
-urls_input = st.text_area("Input URLs")
-submit = st.button("Generate Newsletter")
-
-if submit:
+urls_input = st.text_area("Paste article URLs (one per line)")
+if st.button("Generate"):
     urls = [u.strip() for u in urls_input.split("\n") if u.strip()]
     all_used_urls = set(urls)
-    domains = []
-    headlines = []
-    sections = []
 
-    for u in urls:
-        st.markdown(f"🔍 Fetching: {u}")
+    for url in urls:
+        st.markdown(f"### Processing: {url}")
+        domain = get_root_domain(url)
         try:
-            # Fetch the article title
-            resp = requests.get(u, timeout=10)
-            title = re.search(r"<title>(.*?)</title>", resp.text, re.IGNORECASE)
-            title = title.group(1).strip() if title else u
-        except Exception:
-            title = u
-        headlines.append(title)
-        domain = get_root_domain(u)
-        domains.append(domain)
-        keywords = extract_keywords(title)
-        # Quick Reads: related by keywords, from same site, not main article
-        quick_links = gnews_search(keywords, domain, exclude_urls=all_used_urls | {u}, max_results=3)
-        for _, url in quick_links:
-            all_used_urls.add(url)
-        quick_md = "\n".join([f"- [{t}]({l})" for t, l in quick_links]) if quick_links else "(No related articles found.)"
-        section = f"""
-        <h2>{title}</h2>
-        <p><a href="{u}" target="_blank"><b>Continue Reading →</b></a></p>
-        <div style="margin-top:10px; padding:10px; background-color:#f0f4f8; border-left:4px solid #1e88e5;">
-            <b>Quick Reads from this article:</b>
-            <br>
-            {quick_md}
-        </div>
-        <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
-        """
-        sections.append(section)
+            res = requests.get(url, timeout=10)
+            # Extract article text (simple approach)
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(res.text, "html.parser")
+            paragraphs = soup.find_all("p")
+            content = "\n".join(p.text for p in paragraphs)[:4000]
+            title = soup.title.string.strip() if soup.title else url
 
-    if sections:
-        intro = f"Hi there! This week’s newsletter covers: {', '.join(headlines)}. Dive in below!"
-        st.markdown("## ✨ Newsletter Preview:")
-        st.markdown(f"<p>{intro}</p>", unsafe_allow_html=True)
-        for s in sections:
-            st.markdown(s, unsafe_allow_html=True)
-            # Also render Quick Reads as Markdown for clickable links
-            st.markdown(s.split("<br>")[-1], unsafe_allow_html=True)
+            summary = summarize_text(content, title)
+            st.markdown(f"**Summary:** {summary}")
 
-        # Recommended Reads: latest from the most common domain, excluding all previously shown links
-        from collections import Counter
-        most_common_domain = Counter(domains).most_common(1)[0][0] if domains else None
-        recommended_links = gnews_latest(most_common_domain, exclude_urls=all_used_urls, max_results=3)
-        recommended_md = "\n".join([f"- [{t}]({l})" for t, l in recommended_links]) if recommended_links else "(No more articles found.)"
-        st.markdown("<h3>🔗 Recommended Reads</h3>", unsafe_allow_html=True)
-        st.markdown(recommended_md)
+            # Get related links from Brave Search
+            related = brave_search(title, domain, max_results=3)
+            st.markdown("**Quick Reads:**")
+            for t, l in related:
+                if l not in all_used_urls:
+                    st.markdown(f"- [{t}]({l})")
+                    all_used_urls.add(l)
+
+        except Exception as e:
+            st.error(f"Failed to process {url}: {e}")
