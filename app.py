@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 import re
 from groq import Groq
 
+# Load API keys from .streamlit/secrets.toml
 BRAVE_API_KEY = st.secrets["BRAVE_API_KEY"]
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 client = Groq(api_key=GROQ_API_KEY)
@@ -25,12 +26,40 @@ def extract_keywords(title, max_keywords=4):
     words = re.findall(r'\b\w+\b', title.lower())
     keywords = [w for w in words if w not in stopwords and len(w) > 3]
     keywords = sorted(keywords, key=len, reverse=True)
-    return " ".join(keywords[:max_keywords]) if keywords else title
+    return keywords[:max_keywords] if keywords else words[:max_keywords]
 
-def brave_search(query, domain, exclude_urls=None, max_results=10):
+def get_synonyms(keywords):
+    prompt = (
+        f"For each of these keywords: {', '.join(keywords)}, "
+        "give 2 synonyms or related words (comma-separated, no explanations, just the list)."
+    )
+    try:
+        completion = client.chat.completions.create(
+            model="llama3-70b-8192",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        response = completion.choices[0].message.content.strip()
+        synonym_list = []
+        for line in response.split("\n"):
+            if ":" in line:
+                syns = line.split(":")[1]
+            else:
+                syns = line
+            for s in syns.split(","):
+                word = s.strip()
+                if word and word not in synonym_list:
+                    synonym_list.append(word)
+        return synonym_list
+    except Exception:
+        return []
+
+def brave_search(query, domain=None, exclude_urls=None, max_results=10):
     url = "https://api.search.brave.com/res/v1/web/search"
     headers = {"Accept": "application/json", "X-Subscription-Token": BRAVE_API_KEY}
-    params = {"q": f"site:{domain} {query}", "count": max_results}
+    if domain:
+        params = {"q": f"site:{domain} {query}", "count": max_results}
+    else:
+        params = {"q": query, "count": max_results}
     resp = requests.get(url, headers=headers, params=params)
     results = []
     if resp.status_code == 200:
@@ -78,6 +107,25 @@ def summarize_article(content, title):
     except Exception as e:
         return "Summary unavailable."
 
+def generate_intro(titles):
+    joined_titles = "; ".join(titles)
+    prompt = (
+        f"Write a short, friendly, and energetic newsletter intro (2-3 sentences) "
+        f"welcoming readers and mentioning these topics: {joined_titles}. "
+        "Do not use a list. Make it inviting and concise."
+    )
+    try:
+        completion = client.chat.completions.create(
+            model="llama3-70b-8192",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return completion.choices[0].message.content.strip()
+    except Exception:
+        return (
+            f"Welcome to this week's newsletter! Today, we're covering: {joined_titles}. "
+            "Dive in below for all the details!"
+        )
+
 st.set_page_config(page_title="📰 Advanced Tech Newsletter Generator")
 st.title("📰 Advanced Tech Newsletter Generator")
 
@@ -90,7 +138,9 @@ if submit:
     all_used_urls = set(urls)
     domains = []
     headlines = []
+    article_data = []
 
+    # Gather all info up front for intro and synonym expansion
     for u in urls:
         try:
             resp = requests.get(u, timeout=10)
@@ -108,9 +158,30 @@ if submit:
         domain = get_root_domain(u)
         domains.append(domain)
         keywords = extract_keywords(title)
+        article_data.append({
+            "url": u,
+            "title": title,
+            "image_url": image_url,
+            "summary": summary,
+            "domain": domain,
+            "keywords": keywords
+        })
+
+    # Generate and display the intro
+    intro_text = generate_intro(headlines)
+    st.markdown(f"### {intro_text}\n---")
+
+    # Display each article section
+    for data in article_data:
+        u = data["url"]
+        title = data["title"]
+        image_url = data["image_url"]
+        summary = data["summary"]
+        domain = data["domain"]
+        keywords = data["keywords"]
 
         # Quick Reads: related by keywords, from same site, not main article
-        quick_links = brave_search(keywords, domain, exclude_urls=all_used_urls | {u}, max_results=6)
+        quick_links = brave_search(" ".join(keywords), domain, exclude_urls=all_used_urls | {u}, max_results=6)
         quick_links = quick_links[:3]
         for link in quick_links:
             all_used_urls.add(link["url"])
@@ -130,14 +201,42 @@ if submit:
 
         st.markdown("---")
 
-    # Recommended Reads: recent articles from the most common domain, not already used
+    # Recommended Reads: Broaden scope for at least 3 articles
     from collections import Counter
     most_common_domain = Counter(domains).most_common(1)[0][0] if domains else None
-    recommended_links = brave_search("", most_common_domain, exclude_urls=all_used_urls, max_results=10)
-    recommended_links = recommended_links[:3]
+    recommended_links = []
+
+    # 1. Try recent from same domain
+    recommended_links += brave_search("", most_common_domain, exclude_urls=all_used_urls, max_results=10)
+
+    # 2. If not enough, try synonyms of all main keywords
+    if len(recommended_links) < 3:
+        all_keywords = []
+        for data in article_data:
+            all_keywords += data["keywords"]
+        synonyms = get_synonyms(all_keywords)
+        for syn in synonyms:
+            if len(recommended_links) >= 6:
+                break
+            recommended_links += brave_search(syn, most_common_domain, exclude_urls=all_used_urls | {l['url'] for l in recommended_links}, max_results=2)
+
+    # 3. If STILL not enough, drop domain restriction for latest tech news
+    if len(recommended_links) < 3:
+        recommended_links += brave_search("technology", None, exclude_urls=all_used_urls | {l['url'] for l in recommended_links}, max_results=10)
+
+    # Deduplicate and keep only 3
+    seen = set()
+    final_recommended = []
+    for link in recommended_links:
+        if link["url"] not in seen and link["url"] not in all_used_urls:
+            final_recommended.append(link)
+            seen.add(link["url"])
+        if len(final_recommended) == 3:
+            break
+
     st.markdown("### 🔗 Recommended Reads")
-    if recommended_links:
-        for link in recommended_links:
+    if final_recommended:
+        for link in final_recommended:
             st.markdown(f"- [{link['title']}]({link['url']})")
     else:
         st.markdown("_No more articles found._")
