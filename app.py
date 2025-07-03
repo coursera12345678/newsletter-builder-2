@@ -36,8 +36,15 @@ def extract_image(soup):
     og_img = soup.find("meta", property="og:image")
     return og_img["content"] if og_img else None
 
-# --- Use NewsAPI.org for real, working links ---
-def search_related_articles(query, domain="theverge.com"):
+def get_root_domain(url):
+    # Returns 'theverge.com' for 'www.theverge.com'
+    netloc = urlparse(url).netloc
+    parts = netloc.split('.')
+    if len(parts) >= 2:
+        return '.'.join(parts[-2:])
+    return netloc
+
+def search_related_articles(query, domain):
     api_key = st.secrets["NEWSAPI_KEY"]
     endpoint = "https://newsapi.org/v2/everything"
     params = {
@@ -60,10 +67,9 @@ def search_related_articles(query, domain="theverge.com"):
             ]
             return "<br>".join(links) if links else "(No related articles found.)"
         else:
-            return "(Failed to fetch related articles.)"
+            return f"(Failed to fetch related articles: {response.text})"
     except Exception as e:
         return f"(Failed to load related reads: {e})"
-# ---------------------------------------------------
 
 def generate_intro(headlines):
     joined = ", ".join(headlines)
@@ -80,6 +86,7 @@ if submit:
     urls = [u.strip() for u in urls_input.split("\n") if u.strip()]
     headlines = []
     sections = []
+    domains = []
 
     for u in urls:
         try:
@@ -90,7 +97,9 @@ if submit:
             content = "\n".join(p.text for p in soup.find_all("p"))
             summary = summarize_article(content, title)
             image_url = extract_image(soup)
-            related = search_related_articles(title, urlparse(u).netloc)
+            domain = get_root_domain(u)
+            domains.append(domain)
+            related = search_related_articles(title, domain)
 
             headlines.append(title)
 
@@ -117,13 +126,13 @@ if submit:
         for s in sections:
             st.markdown(s, unsafe_allow_html=True)
 
-        # Final recommended section
+        # Final recommended section: use the most common domain
         try:
-            final_summ = search_related_articles(
-                f"{', '.join(headlines)}",
-                domain="theverge.com"
-            )
-            st.markdown("<h3>🔗 Recommended Reads</h3>", unsafe_allow_html=True)
-            st.markdown(final_summ, unsafe_allow_html=True)
+            from collections import Counter
+            most_common_domain = Counter(domains).most_common(1)[0][0] if domains else None
+            if most_common_domain:
+                final_summ = search_related_articles(f"{', '.join(headlines)}", most_common_domain)
+                st.markdown("<h3>🔗 Recommended Reads</h3>", unsafe_allow_html=True)
+                st.markdown(final_summ, unsafe_allow_html=True)
         except:
             pass
