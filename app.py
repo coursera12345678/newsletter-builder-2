@@ -1,9 +1,9 @@
-import requests
 import streamlit as st
+import requests
 from urllib.parse import urlparse
 import re
 
-GNEWS_API_KEY = "YOUR_GNEWS_API_KEY" 
+GNEWS_API_KEY = st.secrets["GNEWS_API_KEY"]
 
 def get_root_domain(url):
     netloc = urlparse(url).netloc
@@ -60,30 +60,63 @@ def gnews_latest(domain, exclude_urls=None, max_results=5):
             results.append((article["title"], article["url"]))
     return results
 
-# Example usage in your Streamlit app:
-def show_quick_and_recommended(main_url, main_title, all_used_urls):
-    domain = get_root_domain(main_url)
-    keywords = extract_keywords(main_title)
-    # Quick Reads: related by keywords, from same site, not main article
-    quick_links = gnews_search(keywords, domain, exclude_urls=all_used_urls | {main_url}, max_results=3)
-    for _, url in quick_links:
-        all_used_urls.add(url)
-    # Recommended Reads: latest from same site, not already used
-    recommended_links = gnews_latest(domain, exclude_urls=all_used_urls | {main_url}, max_results=3)
-    for _, url in recommended_links:
-        all_used_urls.add(url)
-    # Format as Markdown
-    quick_md = "\n".join([f"- [{t}]({l})" for t, l in quick_links]) if quick_links else "(No related articles found.)"
-    recommended_md = "\n".join([f"- [{t}]({l})" for t, l in recommended_links]) if recommended_links else "(No more articles found.)"
-    return quick_md, recommended_md
+st.set_page_config(page_title="📰 Advanced Tech Newsletter Generator")
+st.title("📰 Advanced Tech Newsletter Generator")
 
-# Example for a single article:
-main_url = "https://www.theverge.com/news/696877/xbox-perfect-dark-everwild-cancelled-the-initiative-layoffs"
-main_title = "Microsoft cancels its Perfect Dark and Everwild Xbox games | The Verge"
-all_used_urls = set([main_url])
-quick_md, recommended_md = show_quick_and_recommended(main_url, main_title, all_used_urls)
+st.markdown("Paste your article URLs (one per line), then click Generate.")
+urls_input = st.text_area("Input URLs")
+submit = st.button("Generate Newsletter")
 
-st.markdown("**Quick Reads from this article:**")
-st.markdown(quick_md)
-st.markdown("**Recommended Reads:**")
-st.markdown(recommended_md)
+if submit:
+    urls = [u.strip() for u in urls_input.split("\n") if u.strip()]
+    all_used_urls = set(urls)
+    domains = []
+    headlines = []
+    sections = []
+
+    for u in urls:
+        st.markdown(f"🔍 Fetching: {u}")
+        try:
+            # Fetch the article title
+            resp = requests.get(u, timeout=10)
+            title = re.search(r"<title>(.*?)</title>", resp.text, re.IGNORECASE)
+            title = title.group(1).strip() if title else u
+        except Exception:
+            title = u
+        headlines.append(title)
+        domain = get_root_domain(u)
+        domains.append(domain)
+        keywords = extract_keywords(title)
+        # Quick Reads: related by keywords, from same site, not main article
+        quick_links = gnews_search(keywords, domain, exclude_urls=all_used_urls | {u}, max_results=3)
+        for _, url in quick_links:
+            all_used_urls.add(url)
+        quick_md = "\n".join([f"- [{t}]({l})" for t, l in quick_links]) if quick_links else "(No related articles found.)"
+        section = f"""
+        <h2>{title}</h2>
+        <p><a href="{u}" target="_blank"><b>Continue Reading →</b></a></p>
+        <div style="margin-top:10px; padding:10px; background-color:#f0f4f8; border-left:4px solid #1e88e5;">
+            <b>Quick Reads from this article:</b>
+            <br>
+            {quick_md}
+        </div>
+        <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
+        """
+        sections.append(section)
+
+    if sections:
+        intro = f"Hi there! This week’s newsletter covers: {', '.join(headlines)}. Dive in below!"
+        st.markdown("## ✨ Newsletter Preview:")
+        st.markdown(f"<p>{intro}</p>", unsafe_allow_html=True)
+        for s in sections:
+            st.markdown(s, unsafe_allow_html=True)
+            # Also render Quick Reads as Markdown for clickable links
+            st.markdown(s.split("<br>")[-1], unsafe_allow_html=True)
+
+        # Recommended Reads: latest from the most common domain, excluding all previously shown links
+        from collections import Counter
+        most_common_domain = Counter(domains).most_common(1)[0][0] if domains else None
+        recommended_links = gnews_latest(most_common_domain, exclude_urls=all_used_urls, max_results=3)
+        recommended_md = "\n".join([f"- [{t}]({l})" for t, l in recommended_links]) if recommended_links else "(No more articles found.)"
+        st.markdown("<h3>🔗 Recommended Reads</h3>", unsafe_allow_html=True)
+        st.markdown(recommended_md)
