@@ -1,103 +1,114 @@
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+import re
+import json
 
-# ========== CONFIG ==========
-GROQ_API_KEY = st.secrets.get("GROQ_API_KEY") or "sk-REPLACE"
+# Groq API config
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 HEADERS = {
     "Authorization": f"Bearer {GROQ_API_KEY}",
     "Content-Type": "application/json"
 }
 
-# ========== FUNCTIONS ==========
-def fetch_article_content(url):
+# Helper to fetch and clean article content
+def fetch_article(url):
     try:
         response = requests.get(url, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        title = soup.title.string if soup.title else "No title found"
-        image = soup.find("meta", property="og:image")
-        image_url = image["content"] if image and image.get("content") else ""
-
-        paragraphs = soup.find_all('p')
-        text = " ".join(p.get_text() for p in paragraphs[:10])
-
-        links = [urljoin(url, a['href']) for a in soup.find_all('a', href=True)]
-        links = list(set([link for link in links if link.startswith("http") and url not in link]))
-
-        return title.strip(), text.strip(), image_url, links
+        soup = BeautifulSoup(response.text, "html.parser")
+        title = soup.find("title").text.strip()
+        text_blocks = soup.find_all(["p"])
+        text = " ".join([p.text for p in text_blocks])
+        text = re.sub(r'\s+', ' ', text)
+        image_tag = soup.find("meta", property="og:image")
+        image_url = image_tag["content"] if image_tag else ""
+        return title, text[:4000], image_url
     except Exception as e:
-        return "", "Failed to fetch article", "", []
+        return None, None, None
 
-def summarize_article_groq(content):
+# LLM summarizer
+def summarize_article(title, text):
+    prompt = f"""Summarize this article in 3 crisp sentences:
+Title: {title}
+Text: {text}
+
+Extract 3 quick reads and 3 recommended reads (if available). Provide clean markdown-like output with sections:
+1. Summary
+2. Quick Reads
+3. Recommended Reads
+Do not include any intro or outro text."""
     payload = {
         "model": "llama3-70b-8192",
         "messages": [
-            {"role": "system", "content": "You are a world-class tech newsletter editor."},
-            {"role": "user", "content": f"Summarize this article in 3 crisp sentences:
-\n\n{content}\n\nUse a conversational but professional tone."}
+            {"role": "user", "content": prompt}
         ]
     }
-    response = requests.post(GROQ_API_URL, headers=HEADERS, json=payload)
-    return response.json()['choices'][0]['message']['content'].strip()
+    res = requests.post(GROQ_API_URL, headers=HEADERS, json=payload)
+    return res.json()["choices"][0]["message"]["content"]
 
-# ========== STREAMLIT UI ==========
-st.set_page_config(page_title="Tech Newsletter Generator", layout="centered")
-st.title("📰 Weekly Tech Newsletter Generator")
-st.markdown("Paste article URLs below (one per line). We'll summarize, extract links, and show the full newsletter preview — clean and styled.")
+# Renderer
+def render_newsletter(sections):
+    st.markdown("""
+        <style>
+        .newsletter {font-family:sans-serif; max-width:700px; margin:auto; padding:20px; line-height:1.6;}
+        .newsletter h1 {text-align:center; font-size:2em; margin-bottom:1em;}
+        .newsletter h2 {margin-top:2em; font-size:1.4em;}
+        .newsletter img {width:100%; border-radius:12px; margin:1em 0;}
+        .newsletter a {color:#007BFF; text-decoration:none;}
+        .newsletter hr {margin:2em 0;}
+        </style>
+    """, unsafe_allow_html=True)
 
-urls_input = st.text_area("Article URLs", height=150)
-if st.button("Generate Newsletter") and urls_input:
-    urls = [url.strip() for url in urls_input.splitlines() if url.strip()]
-    newsletter_data = []
-    quick_reads = set()
-    rec_reads = set()
+    st.markdown("<div class='newsletter'>", unsafe_allow_html=True)
+    st.markdown("<h1>Weekly Tech Digest</h1>", unsafe_allow_html=True)
+    st.markdown("<hr>", unsafe_allow_html=True)
 
-    with st.spinner("Summarizing and compiling newsletter..."):
-        for url in urls:
-            title, content, image_url, article_links = fetch_article_content(url)
-            summary = summarize_article_groq(content)
-            newsletter_data.append({
-                "title": title,
-                "summary": summary,
-                "image_url": image_url,
-                "url": url
-            })
-            # Assume first 2 links are Quick Reads, rest are Recs
-            quick_reads.update(article_links[:2])
-            rec_reads.update(article_links[2:5])
+    for sec in sections:
+        st.markdown(f"<h2>{sec['title']}</h2>", unsafe_allow_html=True)
+        if sec['image']:
+            st.markdown(f"<img src='{sec['image']}' alt='image'>", unsafe_allow_html=True)
+        st.markdown(f"<p>{sec['summary']}</p>", unsafe_allow_html=True)
+        st.markdown(f"<a href='{sec['url']}' target='_blank'>Continue Reading</a>", unsafe_allow_html=True)
+        if sec['quick_reads']:
+            st.markdown("<h3>Quick Reads</h3><ul>" + ''.join([f"<li><a href='{qr}' target='_blank'>{qr}</a></li>" for qr in sec['quick_reads']]) + "</ul>", unsafe_allow_html=True)
+        if sec['recommended']:
+            st.markdown("<h3>Recommended Reads</h3><ul>" + ''.join([f"<li><a href='{rr}' target='_blank'>{rr}</a></li>" for rr in sec['recommended']]) + "</ul>", unsafe_allow_html=True)
+        st.markdown("<hr>", unsafe_allow_html=True)
 
-    # ========== DISPLAY NEWSLETTER ==========
-    st.markdown("---")
-    st.subheader("📬 Your Weekly Tech Digest")
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    featured = newsletter_data[0]
-    st.markdown(f"### {featured['title']}")
-    if featured['image_url']:
-        st.image(featured['image_url'], use_column_width=True)
-    st.markdown(featured['summary'])
-    st.markdown(f"[Continue Reading]({featured['url']})", unsafe_allow_html=True)
+# Streamlit UI
+st.title("📰 Auto Newsletter Generator (Groq + Streamlit)")
+st.write("Paste article URLs below (one per line), then click Generate.")
 
-    if len(newsletter_data) > 1:
-        st.markdown("---")
-        st.subheader("📰 Other Top Stories")
-        for story in newsletter_data[1:]:
-            st.markdown(f"**{story['title']}**")
-            if story['image_url']:
-                st.image(story['image_url'], use_column_width=True)
-            st.markdown(story['summary'])
-            st.markdown(f"[Continue Reading]({story['url']})", unsafe_allow_html=True)
+urls_input = st.text_area("Article URLs", height=200)
+if st.button("Generate Newsletter"):
+    urls = [u.strip() for u in urls_input.strip().split("\n") if u.strip()]
+    output_sections = []
+    for url in urls:
+        st.write(f"🔍 Fetching: {url}")
+        title, text, image = fetch_article(url)
+        if not title or not text:
+            st.warning(f"Could not process {url}")
+            continue
+        summary_data = summarize_article(title, text)
 
-    if quick_reads:
-        st.markdown("---")
-        st.subheader("⚡ Quick Reads")
-        for link in quick_reads:
-            st.markdown(f"- [{link}]({link})")
+        # Parse LLM output (basic regex fallback)
+        summary = re.search(r"Summary\s*[:\-\n]+(.*?)\n(?:Quick Reads|$)", summary_data, re.S)
+        quick = re.findall(r"Quick Reads\s*[:\-\n]+(.*?)\n(?:Recommended Reads|$)", summary_data, re.S)
+        recs = re.findall(r"Recommended Reads\s*[:\-\n]+(.*?)$", summary_data, re.S)
 
-    if rec_reads:
-        st.markdown("---")
-        st.subheader("📚 Recommended Reads")
-        for link in rec_reads:
-            st.markdown(f"- [{link}]({link})")
+        quick_links = re.findall(r"https?://\S+", quick[0]) if quick else []
+        rec_links = re.findall(r"https?://\S+", recs[0]) if recs else []
+
+        output_sections.append({
+            "title": title,
+            "url": url,
+            "image": image,
+            "summary": summary.group(1).strip() if summary else "",
+            "quick_reads": quick_links,
+            "recommended": rec_links
+        })
+
+    render_newsletter(output_sections)
