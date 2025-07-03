@@ -3,6 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from groq import Groq
+import re
 
 # Initialize Groq client
 client = Groq(api_key=st.secrets["GROQ_API_KEY"])
@@ -36,6 +37,22 @@ def extract_image(soup):
     og_img = soup.find("meta", property="og:image")
     return og_img["content"] if og_img else None
 
+def validate_url(url):
+    try:
+        res = requests.head(url, allow_redirects=True, timeout=5)
+        return res.status_code == 200
+    except:
+        return False
+
+def filter_valid_links(markdown_links):
+    pattern = r"\[([^\]]+)\]\((https?://[^\)]+)\)"
+    matches = re.findall(pattern, markdown_links)
+    valid_links = [
+        f"[{title}]({url})"
+        for title, url in matches if validate_url(url)
+    ]
+    return "<br>".join(valid_links) if valid_links else "(No valid links found.)"
+
 def search_related_articles(query, domain="www.theverge.com"):
     search_prompt = f"""
     Find 2 recent articles from {domain} that are related to this topic: '{query}'. For each, return a title and a URL. Avoid TikTok, YouTube or social links.
@@ -46,9 +63,10 @@ def search_related_articles(query, domain="www.theverge.com"):
             model="llama3-70b-8192",
             messages=[{"role": "user", "content": search_prompt}]
         )
-        return completion.choices[0].message.content.strip()
-    except:
-        return "(Failed to load related reads.)"
+        raw_links = completion.choices[0].message.content.strip()
+        return filter_valid_links(raw_links)
+    except Exception as e:
+        return f"(Failed to load related reads: {e})"
 
 def generate_intro(headlines):
     joined = ", ".join(headlines)
@@ -112,3 +130,4 @@ if submit:
             st.markdown(final_summ, unsafe_allow_html=True)
         except:
             pass
+
