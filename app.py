@@ -1,98 +1,99 @@
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse
 
-st.set_page_config(page_title="Auto Newsletter Generator", layout="centered")
+GROQ_API_KEY = st.secrets["GROQ_API_KEY"]  # Ensure you set this in Streamlit secrets
+
 st.title("📰 Auto Newsletter Generator (Groq + Streamlit)")
-st.markdown("Paste article URLs below (one per line), then click **Generate Newsletter**.")
+st.markdown("Paste article URLs below (one per line), then click Generate Newsletter.")
 
-# --- Input box
-urls_input = st.text_area("Article URLs", height=200, placeholder="https://example.com/article1\nhttps://example.com/article2")
+urls_input = st.text_area("Article URLs", height=150)
 
-# --- Button to trigger processing
 if st.button("Generate Newsletter"):
-    urls = [url.strip() for url in urls_input.split("\n") if url.strip()]
-    if not urls:
-        st.warning("Please enter at least one valid URL.")
-    else:
-        newsletter_html = """
-        <div style='font-family:sans-serif; max-width:600px; margin:auto;'>
-            <h1 style='text-align:center;'>Weekly Tech Digest</h1>
-            <hr>
-        """
+    urls = [url.strip() for url in urls_input.strip().split("\n") if url.strip()]
+    summaries = []
+    quick_reads = []
+    recommended_reads = []
 
-        quick_reads = set()
-        recommended_reads = set()
+    for url in urls:
+        st.write(f"🔍 Fetching: {url}")
 
-        for i, url in enumerate(urls):
-            try:
-                st.markdown(f"🔍 Fetching: {url}")
-                response = requests.get(url, timeout=10)
-                soup = BeautifulSoup(response.text, 'html.parser')
+        try:
+            res = requests.get(url, timeout=10)
+            soup = BeautifulSoup(res.text, "html.parser")
 
-                # Title
-                title_tag = soup.find('title')
-                title = title_tag.get_text(strip=True) if title_tag else f"Article {i+1}"
+            title_tag = soup.find("meta", property="og:title") or soup.find("title")
+            image_tag = soup.find("meta", property="og:image")
 
-                # Summary using Groq
-                chat_url = "https://api.groq.com/openai/v1/chat/completions"
-                headers = {
-                    "Authorization": f"Bearer YOUR_GROQ_API_KEY",
-                    "Content-Type": "application/json"
-                }
-                payload = {
-                    "model": "mixtral-8x7b-32768",
-                    "messages": [
-                        {"role": "system", "content": "You are a tech newsletter assistant."},
-                        {"role": "user", "content": f"Summarize this article in 3 crisp sentences:\n{response.text[:3000]}"}
-                    ]
-                }
-                summary_resp = requests.post(chat_url, headers=headers, json=payload)
-                summary_data = summary_resp.json()
-                summary = summary_data["choices"][0]["message"]["content"].strip()
+            title = title_tag["content"] if title_tag and title_tag.has_attr("content") else (title_tag.text if title_tag else "No title")
+            image = image_tag["content"] if image_tag and image_tag.has_attr("content") else ""
 
-                # Main image
-                img_tag = soup.find('meta', property='og:image') or soup.find('meta', attrs={'name': 'twitter:image'})
-                img_url = img_tag['content'] if img_tag else ""
+            paragraphs = soup.find_all("p")
+            text_content = " ".join(p.get_text() for p in paragraphs[:10])
 
-                # Extract internal links
-                for link in soup.find_all('a', href=True):
-                    href = link['href']
-                    if any(domain in href for domain in ["youtube.com", "tiktok.com"]):
-                        quick_reads.add(href)
-                    elif "theverge.com" in href or "techcrunch.com" in href:
-                        recommended_reads.add(href)
+            headers = {
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json"
+            }
 
-                # Create article block
-                newsletter_html += f"""
-                    <h2>{title}</h2>
-                    {'<img src="' + img_url + '" alt="image" style="width:100%; border-radius:10px;">' if img_url else ''}
-                    <p>{summary}</p>
-                    <a href='{url}' style='color:#007BFF;'>Continue Reading</a>
-                    <hr>
-                """
+            data = {
+                "model": "mixtral-8x7b-32768",
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": f"Summarize this article in 3 crisp sentences:\n{text_content}"}
+                ]
+            }
 
-            except Exception as e:
-                st.error(f"Failed to process {url}: {str(e)}")
+            response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=data)
+            res_json = response.json()
 
-        # Quick Reads section
+            if "choices" in res_json:
+                summary = res_json["choices"][0]["message"]["content"].strip()
+            else:
+                st.error(f"Failed to generate summary for {url}: {res_json}")
+                continue
+
+            links = [a["href"] for a in soup.find_all("a", href=True) if a["href"].startswith("http")]
+            quick_reads.extend(links[:3])
+            recommended_reads.extend(links[3:6])
+
+            summaries.append({
+                "title": title,
+                "image": image,
+                "summary": summary,
+                "url": url
+            })
+
+        except Exception as e:
+            st.error(f"Failed to process {url}: {e}")
+
+    if summaries:
+        st.markdown("---")
+        st.markdown("## ✨ Newsletter Preview")
+        st.markdown("<div style='font-family:sans-serif; max-width:700px; margin:auto;'>", unsafe_allow_html=True)
+        st.markdown("<h1 style='text-align:center;'>Weekly Tech Digest</h1><hr>", unsafe_allow_html=True)
+
+        st.markdown("<h2>📰 Top Stories</h2>", unsafe_allow_html=True)
+        for article in summaries:
+            st.markdown(f"""
+                <div style='margin-bottom:30px;'>
+                    <h3>{article['title']}</h3>
+                    <img src='{article['image']}' alt='Image' style='width:100%; border-radius:10px;'>
+                    <p>{article['summary']}</p>
+                    <a href='{article['url']}' style='color:#007BFF;'>Continue Reading</a>
+                </div>
+            """, unsafe_allow_html=True)
+
         if quick_reads:
-            newsletter_html += "<h3>Quick Reads</h3><ul>"
-            for link in list(quick_reads)[:5]:
-                newsletter_html += f"<li><a href='{link}' target='_blank'>{link}</a></li>"
-            newsletter_html += "</ul>"
+            st.markdown("<hr><h3>⚡ Quick Reads</h3><ul>", unsafe_allow_html=True)
+            for link in quick_reads:
+                st.markdown(f"<li><a href='{link}' target='_blank'>{link}</a></li>", unsafe_allow_html=True)
+            st.markdown("</ul>", unsafe_allow_html=True)
 
-        # Recommended Reads section
         if recommended_reads:
-            newsletter_html += "<h3>Recommended Reads</h3><ul>"
-            for link in list(recommended_reads)[:5]:
-                newsletter_html += f"<li><a href='{link}' target='_blank'>{link}</a></li>"
-            newsletter_html += "</ul>"
+            st.markdown("<hr><h3>📚 Recommended Reads</h3><ul>", unsafe_allow_html=True)
+            for link in recommended_reads:
+                st.markdown(f"<li><a href='{link}' target='_blank'>{link}</a></li>", unsafe_allow_html=True)
+            st.markdown("</ul>", unsafe_allow_html=True)
 
-        newsletter_html += "</div>"
-
-        st.markdown("""
-        ### ✨ Newsletter Preview:
-        """, unsafe_allow_html=True)
-        st.components.v1.html(newsletter_html, height=1200, scrolling=True)
+        st.markdown("</div>", unsafe_allow_html=True)
