@@ -42,7 +42,7 @@ def get_root_domain(url):
         return '.'.join(parts[-2:])
     return netloc
 
-def get_related_articles(query, domain, exclude_urls=None, min_results=2):
+def get_related_articles(query, domain, exclude_urls, count=2):
     api_key = st.secrets["NEWSAPI_KEY"]
     endpoint = "https://newsapi.org/v2/everything"
     params = {
@@ -50,7 +50,7 @@ def get_related_articles(query, domain, exclude_urls=None, min_results=2):
         "domains": domain,
         "language": "en",
         "sortBy": "relevancy",
-        "pageSize": 5,  # Fetch more for filtering
+        "pageSize": 5,
         "apiKey": api_key
     }
     try:
@@ -59,28 +59,24 @@ def get_related_articles(query, domain, exclude_urls=None, min_results=2):
             results = response.json().get("articles", [])
             links = []
             for item in results:
-                if exclude_urls and item['url'] in exclude_urls:
-                    continue
-                links.append(f"[{item['title']}]({item['url']})")
-                if len(links) >= min_results:
+                if item['url'] not in exclude_urls:
+                    links.append((item['title'], item['url']))
+                if len(links) >= count:
                     break
-            # Fallback: If not enough related, fill with latest from site
-            if len(links) < min_results:
-                links += get_latest_articles(domain, exclude_urls, min_results - len(links))
-            return "<br>".join(links) if links else "(No articles available on this site.)"
+            return links
         else:
-            return f"(Failed to fetch articles: {response.text})"
-    except Exception as e:
-        return f"(Failed to load articles: {e})"
+            return []
+    except Exception:
+        return []
 
-def get_latest_articles(domain, exclude_urls=None, count=2):
+def get_latest_articles(domain, exclude_urls, count=3):
     api_key = st.secrets["NEWSAPI_KEY"]
     endpoint = "https://newsapi.org/v2/everything"
     params = {
         "domains": domain,
         "language": "en",
         "sortBy": "publishedAt",
-        "pageSize": max(5, count),
+        "pageSize": max(10, count),
         "apiKey": api_key
     }
     try:
@@ -89,9 +85,8 @@ def get_latest_articles(domain, exclude_urls=None, count=2):
             results = response.json().get("articles", [])
             links = []
             for item in results:
-                if exclude_urls and item['url'] in exclude_urls:
-                    continue
-                links.append(f"[{item['title']}]({item['url']})")
+                if item['url'] not in exclude_urls:
+                    links.append((item['title'], item['url']))
                 if len(links) >= count:
                     break
             return links
@@ -116,9 +111,8 @@ if submit:
     headlines = []
     sections = []
     domains = []
-    url_set = set(urls)
-
-    article_urls_per_domain = {}
+    all_used_urls = set(urls)  # To avoid any repeats
+    quick_links_per_article = []
 
     for u in urls:
         try:
@@ -131,10 +125,19 @@ if submit:
             image_url = extract_image(soup)
             domain = get_root_domain(u)
             domains.append(domain)
-            # Track all main article URLs per domain to exclude from recommendations
-            article_urls_per_domain.setdefault(domain, set()).add(u)
-            # Related articles from same domain, using title as query, excluding this article
-            related = get_related_articles(title, domain, exclude_urls={u}, min_results=2)
+
+            # Related articles from same domain using title as query, excluding this article and any already used
+            related_links = get_related_articles(title, domain, all_used_urls, count=2)
+            # Add these quick links to the set of all used URLs
+            for _, link_url in related_links:
+                all_used_urls.add(link_url)
+            quick_links_per_article.append(set(link_url for _, link_url in related_links))
+
+            # Format quick links as Markdown
+            if related_links:
+                quick_links_md = "<br>".join(f"[{t}]({l})" for t, l in related_links)
+            else:
+                quick_links_md = "(No related articles found on this site.)"
 
             headlines.append(title)
 
@@ -145,7 +148,7 @@ if submit:
             <p><a href="{u}" target="_blank"><b>Continue Reading →</b></a></p>
             <div style="margin-top:10px; padding:10px; background-color:#f0f4f8; border-left:4px solid #1e88e5;">
                 <b>Quick Reads from this article:</b><br>
-                {related}
+                {quick_links_md}
             </div>
             <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
             """
@@ -161,14 +164,17 @@ if submit:
         for s in sections:
             st.markdown(s, unsafe_allow_html=True)
 
-        # Final recommended section: show latest stories from the most common domain, excluding main articles
+        # Final recommended section: show latest stories from the most common domain, excluding all previously shown links
         try:
             from collections import Counter
             most_common_domain = Counter(domains).most_common(1)[0][0] if domains else None
-            exclude_urls = article_urls_per_domain.get(most_common_domain, set())
-            recommended_links = get_latest_articles(most_common_domain, exclude_urls=exclude_urls, count=3)
+            # Exclude all main articles and all quick links already shown
+            exclude_urls = set(urls)
+            for quick_set in quick_links_per_article:
+                exclude_urls.update(quick_set)
+            recommended_links = get_latest_articles(most_common_domain, exclude_urls, count=3)
             if recommended_links:
                 st.markdown("<h3>🔗 Recommended Reads</h3>", unsafe_allow_html=True)
-                st.markdown("<br>".join(recommended_links), unsafe_allow_html=True)
+                st.markdown("<br>".join(f"[{t}]({l})" for t, l in recommended_links), unsafe_allow_html=True)
         except Exception as e:
             st.error(f"Failed to fetch recommended reads: {e}")
