@@ -1,99 +1,115 @@
 import streamlit as st
 import requests
+from bs4 import BeautifulSoup
+import openai
 from urllib.parse import urlparse
-from groq import Groq  # Ensure your Groq client is configured correctly
 
-st.set_page_config(page_title="Tech Newsletter Generator", layout="wide")
+# Groq API setup
+openai.api_key = st.secrets["GROQ_API_KEY"]
+openai.api_base = "https://api.groq.com/openai/v1"
 
 st.title("📰 Advanced Tech Newsletter Generator")
-st.markdown("Paste your article URLs (one per line), then click Generate.")
+st.write("Paste your article URLs (one per line), then click Generate.")
 
-input_urls = st.text_area("Input URLs", height=200)
+urls_input = st.text_area("Input URLs", height=150)
+submit = st.button("Generate")
 
-def fetch_article_data(url):
+@st.cache_data(show_spinner=False)
+def fetch_article_content(url):
     try:
-        # This should call your Groq LLM API for article processing
-        response = Groq.chat.completions.create(
-            model="llama3-70b-8192",  # Use supported Groq model
+        res = requests.get(url, timeout=10)
+        soup = BeautifulSoup(res.text, "html.parser")
+        paragraphs = soup.find_all("p")
+        text = "\n".join(p.get_text() for p in paragraphs)
+        return text.strip()
+    except:
+        return ""
+
+def summarize_article(content):
+    try:
+        response = openai.ChatCompletion.create(
+            model="llama3-70b-8192",
             messages=[
-                {"role": "user", "content": f"Extract the headline, summary (6 lines max), and featured image from this article: {url}"}
+                {"role": "user", "content": f"Summarize this article in a short but informative way, suitable for a newsletter. Do not include any extra lines or intros."},
+                {"role": "user", "content": content[:4000]}
             ]
         )
-        result = response.choices[0].message.content
-        return result
+        return response["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        return None
+        return f"Summary unavailable. Error: {e}"
 
-def search_related_articles(topic, domain):
+def get_featured_image(url):
     try:
-        prompt = f"""
-        Give me 3 related articles on the topic: "{topic}" from {domain}. For each article, give:
-        - Title
-        - URL
-        - One-line summary
-        """
-        response = Groq.chat.completions.create(
-            model="llama3-70b-8192",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.choices[0].message.content
+        res = requests.get(url, timeout=10)
+        soup = BeautifulSoup(res.text, "html.parser")
+        meta = soup.find("meta", property="og:image")
+        if meta and meta.get("content"):
+            return meta["content"]
     except:
-        return "No related articles found."
+        pass
+    return None
 
-def render_article(title, image, summary, url, related_articles):
-    st.markdown(f"## {title}")
-    if image:
-        st.image(image, use_container_width=True)
-    st.markdown(summary)
-    st.markdown(f"[Continue Reading →]({url})")
+def extract_title(url):
+    try:
+        res = requests.get(url, timeout=10)
+        soup = BeautifulSoup(res.text, "html.parser")
+        return soup.title.string.strip()
+    except:
+        return "Title Unavailable"
 
-    if related_articles:
-        st.markdown("**Quick Reads from this article**")
-        st.markdown(related_articles)
-    st.markdown("---")
+def search_related(topic, domain):
+    try:
+        search_query = f"site:{domain} {topic}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(f"https://www.google.com/search?q={search_query}", headers=headers)
+        soup = BeautifulSoup(res.text, "html.parser")
+        links = []
+        for g in soup.find_all("div", class_="tF2Cxc"):
+            title_elem = g.find("h3")
+            link_elem = g.find("a")
+            if title_elem and link_elem:
+                links.append((title_elem.get_text(), link_elem["href"]))
+        return links[:3]
+    except:
+        return []
 
-def fetch_intro(urls):
-    topics = ["Microsoft cancels games", "Google Photos upgrades", "Apple's Invasion returns"]
-    return "Hi there! This week’s newsletter covers key updates: " + ", ".join(topics) + "."
+if submit and urls_input:
+    urls = urls_input.strip().split("\n")
 
-if st.button("Generate"):
-    urls = [u.strip() for u in input_urls.splitlines() if u.strip()]
+    st.markdown("### Intro")
+    st.write("Hi there! This week’s newsletter covers key updates: " + ", ".join([extract_title(u) for u in urls]))
 
-    if not urls:
-        st.error("Please paste at least one article URL.")
-    else:
-        intro = fetch_intro(urls)
-        st.markdown("## Intro")
-        st.markdown(intro)
+    for u in urls:
+        with st.spinner(f"🔍 Fetching: {u}"):
+            content = fetch_article_content(u)
+            if not content:
+                st.warning(f"Failed to process {u}: Empty content")
+                continue
+            title = extract_title(u)
+            image = get_featured_image(u)
+            summary = summarize_article(content)
 
-        for u in urls:
-            st.markdown(f"🔍 Fetching: {u}")
-            try:
-                data = fetch_article_data(u)
-                if not data:
-                    st.error(f"Failed to process {u}")
-                    continue
+            st.markdown(f"## {title}")
+            if image:
+                st.image(image, use_container_width=True)
 
-                # Basic parsing (replace with JSON parsing if returned in JSON)
-                title = data.split("\n")[0].strip()
-                image = ""  # extract actual image if included
-                summary = "\n".join(data.split("\n")[1:]).strip()
-                domain = urlparse(u).netloc
+            st.write(summary)
+            st.markdown(f"[Continue Reading →]({u})")
 
-                related = search_related_articles(title, domain)
+            # Quick Reads
+            related = search_related(title, urlparse(u).netloc)
+            if related:
+                st.markdown("**Quick Reads from this Article**")
+                for rt, rl in related:
+                    st.markdown(f"- [{rt}]({rl})")
 
-                render_article(title, image, summary, u, related)
-            except Exception as e:
-                st.error(f"Error with {u}: {e}")
+            st.markdown("---")
 
-        # Final section: Recommended Reads
-        st.markdown("## 📚 Recommended Reads")
-        rec_prompt = "Based on the topics covered in this newsletter, recommend 3 similar tech articles from The Verge. Include title, 1-line summary, and link."
-        try:
-            recs = Groq.chat.completions.create(
-                model="llama3-70b-8192",
-                messages=[{"role": "user", "content": rec_prompt}]
-            )
-            st.markdown(recs.choices[0].message.content)
-        except:
-            st.markdown("No recommended reads available.")
+    # Recommended Reads (placeholder logic: gather similar articles)
+    st.markdown("### 📚 Recommended Reads")
+    for u in urls:
+        title = extract_title(u)
+        domain = urlparse(u).netloc
+        related = search_related(title, domain)
+        for rt, rl in related:
+            st.markdown(f"- [{rt}]({rl})")
