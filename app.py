@@ -31,7 +31,7 @@ def extract_keywords(title, max_keywords=4):
 def get_synonyms(keywords):
     prompt = (
         f"For each of these keywords: {', '.join(keywords)}, "
-        "give 2 synonyms or related words (comma-separated, no explanations, just the list)."
+        "give 2 synonyms or related words (comma-separated, no explanations, just the list, no dividers or lists)."
     )
     try:
         completion = client.chat.completions.create(
@@ -101,16 +101,20 @@ def summarize_article(content, title):
     # Always provide *some* context to the LLM
     if not content:
         content = f"This article is titled: {title}."
-    prompt = f"Summarize the following article titled '{title}' in 5 concise, engaging sentences. Do not start with 'Here is a summary...':\n{content}"
+    prompt = (
+        f"Summarize the following article titled '{title}' in 5 concise, engaging sentences. "
+        "Do not start with 'Here is a summary...'. Do not use lists or dividers."
+    )
     try:
         completion = client.chat.completions.create(
             model="llama3-70b-8192",
-            messages=[{"role": "user", "content": prompt}]
+            messages=[{"role": "user", "content": prompt + "\n" + content}]
         )
         summary = completion.choices[0].message.content.strip()
-        if not summary or summary.lower().startswith("summary unavailable"):
-            return "Summary unavailable."
-        return summary
+        # Remove any divider lines or "Best---" etc
+        summary = re.sub(r"^[-=]{2,}.*$", "", summary, flags=re.MULTILINE).strip()
+        summary = re.sub(r"^Best.*$", "", summary, flags=re.MULTILINE).strip()
+        return summary if summary else "Summary unavailable."
     except Exception:
         return "Summary unavailable."
 
@@ -119,14 +123,18 @@ def generate_intro(titles):
     prompt = (
         f"Write a short, friendly, and energetic newsletter intro (2-3 sentences) "
         f"welcoming readers and mentioning these topics: {joined_titles}. "
-        "Do not use a list. Make it inviting and concise."
+        "Do not use a list, dividers, or phrases like 'Best---'."
     )
     try:
         completion = client.chat.completions.create(
             model="llama3-70b-8192",
             messages=[{"role": "user", "content": prompt}]
         )
-        return completion.choices[0].message.content.strip()
+        intro = completion.choices[0].message.content.strip()
+        # Remove any divider lines or "Best---" etc
+        intro = re.sub(r"^[-=]{2,}.*$", "", intro, flags=re.MULTILINE).strip()
+        intro = re.sub(r"^Best.*$", "", intro, flags=re.MULTILINE).strip()
+        return intro
     except Exception:
         return (
             f"Welcome to this week's newsletter! Today, we're covering: {joined_titles}. "
@@ -178,8 +186,10 @@ if submit:
     st.markdown(f'<p style="font-size:0.95em;">{intro_text}</p>', unsafe_allow_html=True)
     st.markdown("---")
 
-    # For deduplication
-    quick_used_urls = set()
+    # For deduplication of recommendations only
+    rec_used_urls = set()
+    # For quick links, deduplicate only against main article and itself
+    quick_links_all = []
 
     for data in article_data:
         u = data["url"]
@@ -189,11 +199,23 @@ if submit:
         domain = data["domain"]
         keywords = data["keywords"]
 
-        # Quick Reads: related by keywords, from same site, not main article
-        quick_links = brave_search(" ".join(keywords), domain, exclude_urls=quick_used_urls | {u}, max_results=8)
-        quick_links = quick_links[:3]
+        # Quick Reads: deduplicate only against this article and its quick links
+        quick_links = brave_search(
+            " ".join(keywords),
+            domain,
+            exclude_urls={u},
+            max_results=8
+        )
+        # Only keep up to 3, and avoid duplicates within this article's quick links
+        seen_quick = set()
+        filtered_quick_links = []
         for link in quick_links:
-            quick_used_urls.add(link["url"])
+            if link["url"] not in seen_quick and link["url"] != u:
+                filtered_quick_links.append(link)
+                seen_quick.add(link["url"])
+            if len(filtered_quick_links) == 3:
+                break
+        quick_links_all.extend([l["url"] for l in filtered_quick_links])
 
         st.markdown(f"## {title}")
         if image_url:
@@ -202,8 +224,8 @@ if submit:
         st.markdown(f"[Continue Reading →]({u})")
 
         st.markdown("**Quick Reads from this article:**")
-        if quick_links:
-            for link in quick_links:
+        if filtered_quick_links:
+            for link in filtered_quick_links:
                 st.markdown(f"- [{link['title']}]({link['url']})")
         else:
             st.markdown("_No related articles found._")
@@ -211,7 +233,7 @@ if submit:
         st.markdown("---")
 
     # After all quick links, update all_used_urls to prevent overlap with recommendations
-    all_used_urls.update(quick_used_urls)
+    all_used_urls.update(quick_links_all)
 
     # Recommended Reads: escalate aggressively
     from collections import Counter
