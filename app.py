@@ -1,127 +1,113 @@
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from newspaper import Article
 import os
+import re
 
-# Load API key
-GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-GROQ_MODEL = "llama3-8b-8192"
+# Load Groq API Key
+API_KEY = st.secrets["GROQ_API_KEY"]
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+MODEL = "llama3-70b-8192"
 
-st.set_page_config(page_title="📰 Auto Newsletter Generator", layout="centered")
-st.title("📰 Auto Newsletter Generator (Groq + Streamlit)")
+# Helper function to extract links from within article HTML
+def extract_links(html):
+    soup = BeautifulSoup(html, 'html.parser')
+    return [a['href'] for a in soup.find_all('a', href=True) if a['href'].startswith('http')]
 
-st.markdown("Paste article URLs below (one per line), then click **Generate Newsletter**.")
-
-urls_input = st.text_area("Article URLs", height=200)
-generate = st.button("Generate Newsletter")
-
-headers = {
-    "Authorization": f"Bearer {GROQ_API_KEY}",
-    "Content-Type": "application/json"
-}
-
-def fetch_article_data(url):
-    try:
-        res = requests.get(url, timeout=10)
-        soup = BeautifulSoup(res.text, 'html.parser')
-
-        title = soup.find("title").text.strip() if soup.find("title") else "Untitled"
-        paragraphs = soup.find_all("p")
-        text = " ".join(p.get_text() for p in paragraphs[:10])
-
-        image_tag = soup.find("meta", property="og:image") or soup.find("img")
-        image_url = image_tag["content"] if image_tag and image_tag.has_attr("content") else ""
-        if not image_url and image_tag and image_tag.has_attr("src"):
-            image_url = urljoin(url, image_tag["src"])
-
-        # Extract internal links
-        links = []
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if "http" in href and not href.startswith("#") and url not in href:
-                links.append(href)
-        links = list(set(links))[:5]
-
-        return title, text, image_url, links
-    except Exception as e:
-        return "Error", "", "", []
-
-def summarize_text(title, content):
-    prompt = f"Summarize the following article titled '{title}' in 3-4 lines:\n\n{content}"
-    data = {
-        "model": GROQ_MODEL,
-        "messages": [
-            {"role": "user", "content": prompt}
-        ]
+# Groq call wrapper
+def generate_summary(prompt):
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json"
     }
-    res = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=data)
-    return res.json()['choices'][0]['message']['content'].strip()
+    data = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7
+    }
+    response = requests.post(GROQ_URL, headers=headers, json=data)
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"]
 
-if generate:
-    urls = [url.strip() for url in urls_input.split("\n") if url.strip()]
-    summaries = []
-    quick_reads = set()
-    recommended_reads = set()
-
-    for idx, url in enumerate(urls):
-        with st.spinner(f"🔍 Fetching: {url}"):
-            title, content, image_url, links = fetch_article_data(url)
-            summary = summarize_text(title, content)
-
-            summaries.append({
-                "title": title,
-                "summary": summary,
-                "image_url": image_url,
-                "url": url
-            })
-
-            for link in links:
-                if "youtube" in link or "trailer" in link:
-                    recommended_reads.add(link)
-                else:
-                    quick_reads.add(link)
-
-    # Render newsletter HTML
-    html = '<div style="font-family:sans-serif; max-width:600px; margin:auto;">'
-    html += '<h1 style="text-align:center; color:#333;">Weekly Tech Digest</h1>'
-
-    # Main story
-    main = summaries[0]
-    html += f"""
-        <div style="margin-bottom:30px;">
-            <img src="{main['image_url']}" alt="Main Image" style="width:100%; border-radius:10px;">
-            <h2 style="color:#2c3e50;">{main['title']}</h2>
-            <p style="color:#555;">{main['summary']}</p>
-            <a href="{main['url']}" style="color:#1e90ff; text-decoration:none;">Continue Reading →</a>
-        </div>
+# HTML rendering helpers
+def format_article_html(title, summary, link, image_url):
+    return f"""
+    <div style="margin-bottom: 30px;">
+        <img src="{image_url}" alt="{title}" style="width:100%; border-radius: 8px;">
+        <h2 style="margin: 10px 0 5px;">{title}</h2>
+        <p style="margin: 0 0 10px;">{summary}</p>
+        <a href="{link}" style="color: #3366cc; text-decoration: none;">Continue Reading →</a>
+    </div>
     """
 
-    # Other stories
-    html += '<h3 style="border-top:1px solid #ccc; padding-top:20px; color:#2c3e50;">Top Stories</h3>'
-    for story in summaries[1:]:
-        html += f"""
-            <div style="margin-bottom:20px;">
-                <img src="{story['image_url']}" alt="Story Image" style="width:100%; border-radius:10px;">
-                <h4 style="color:#2c3e50;">{story['title']}</h4>
-                <p style="color:#555;">{story['summary']}</p>
-                <a href="{story['url']}" style="color:#1e90ff; text-decoration:none;">Continue Reading →</a>
-            </div>
+def format_list_section(title, links):
+    if not links:
+        return ""
+    items = ''.join(f'<li><a href="{url}" style="color:#3366cc;">{url}</a></li>' for url in links)
+    return f"""
+    <h3 style="margin-top: 30px;">{title}</h3>
+    <ul style="padding-left: 20px;">{items}</ul>
+    """
+
+# Streamlit App UI
+st.title("📰 Auto Newsletter Generator (Groq + Streamlit)")
+st.write("Paste article URLs below (one per line), then click **Summarize**.")
+
+urls_input = st.text_area("Article URLs", height=200)
+if st.button("Summarize"):
+    urls = [url.strip() for url in urls_input.splitlines() if url.strip()]
+    if not urls:
+        st.error("Please paste at least one valid URL.")
+    else:
+        newsletter_sections = []
+        all_quick_reads = set()
+        all_recommended_reads = set()
+
+        for i, url in enumerate(urls):
+            st.write(f"🔍 Fetching: {url}")
+            try:
+                article = Article(url)
+                article.download()
+                article.parse()
+                article.nlp()
+
+                title = article.title
+                text = article.text
+                image_url = article.top_image or "https://via.placeholder.com/600x300?text=No+Image"
+                links_in_article = extract_links(article.html)
+
+                # Summarize main content
+                prompt = f"Summarize the following news article in 3-4 sentences in an informative but friendly tone:\n\n{text}"
+                summary = generate_summary(prompt)
+
+                # First article becomes main story
+                if i == 0:
+                    newsletter_sections.append(f"<h1 style='font-size:28px;'>Weekly Tech Digest</h1>")
+                    newsletter_sections.append("<h2>Breaking News</h2>")
+                elif i == 1:
+                    newsletter_sections.append("<h2>Other Top Stories</h2>")
+
+                newsletter_sections.append(format_article_html(title, summary, url, image_url))
+
+                # Add links to Quick Reads / Recommended
+                if links_in_article:
+                    all_quick_reads.update(links_in_article[:2])
+                    all_recommended_reads.update(links_in_article[2:4])
+
+            except Exception as e:
+                st.error(f"Error processing {url}: {e}")
+
+        # Append Quick Reads & Recommended Reads
+        newsletter_sections.append(format_list_section("Quick Reads", all_quick_reads))
+        newsletter_sections.append(format_list_section("Recommended Reads", all_recommended_reads))
+
+        final_html = f"""
+        <div style="font-family: Arial, sans-serif; max-width:600px; margin:auto; padding:20px; line-height:1.6;">
+            {''.join(newsletter_sections)}
+        </div>
         """
 
-    # Quick Reads
-    html += '<h3 style="margin-top:30px; color:#2c3e50;">Quick Reads</h3><ul>'
-    for link in quick_reads:
-        html += f'<li><a href="{link}" target="_blank" style="color:#1e90ff;">{link}</a></li>'
-    html += '</ul>'
-
-    # Recommended Reads
-    html += '<h3 style="margin-top:30px; color:#2c3e50;">Recommended Reads</h3><ul>'
-    for link in recommended_reads:
-        html += f'<li><a href="{link}" target="_blank" style="color:#1e90ff;">{link}</a></li>'
-    html += '</ul>'
-
-    html += '</div>'
-
-    st.markdown("### ✨ Newsletter Preview (HTML):", unsafe_allow_html=True)
-    st.components.v1.html(html, height=900, scrolling=True)
+        st.markdown("### ✨ Newsletter Preview (HTML):")
+        st.code(final_html, language='html')
+        st.components.v1.html(final_html, height=800, scrolling=True)
