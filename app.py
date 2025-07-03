@@ -3,6 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from groq import Groq
+import re
 
 client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
@@ -42,6 +43,16 @@ def get_root_domain(url):
         return '.'.join(parts[-2:])
     return netloc
 
+def extract_keywords(title, max_keywords=4):
+    # Remove punctuation, split, filter out short/common words, pick the longest/most unique words
+    stopwords = set([
+        "the", "and", "for", "but", "with", "from", "this", "that", "have", "has", "will", "are", "was", "its", "his", "her", "their", "our", "your", "about", "into", "over", "plus", "just", "more", "than", "now", "out", "new", "all", "can", "see", "get", "got", "off", "on", "in", "to", "of", "by", "as", "at", "is", "it", "be", "or", "an", "a", "so", "up", "back", "for", "not", "you", "we", "he", "she", "they", "his", "her", "our", "their", "your", "my", "me", "i"
+    ])
+    words = re.findall(r'\b\w+\b', title.lower())
+    keywords = [w for w in words if w not in stopwords and len(w) > 3]
+    keywords = sorted(keywords, key=len, reverse=True)
+    return " ".join(keywords[:max_keywords]) if keywords else title
+
 def get_related_articles(query, domain, exclude_urls, count=2):
     api_key = st.secrets["NEWSAPI_KEY"]
     endpoint = "https://newsapi.org/v2/everything"
@@ -50,7 +61,7 @@ def get_related_articles(query, domain, exclude_urls, count=2):
         "domains": domain,
         "language": "en",
         "sortBy": "relevancy",
-        "pageSize": 10,  # Fetch more for filtering
+        "pageSize": 10,
         "apiKey": api_key
     }
     try:
@@ -111,7 +122,7 @@ if submit:
     headlines = []
     sections = []
     domains = []
-    all_used_urls = set(urls)  # To avoid any repeats (main articles)
+    all_used_urls = set(urls)
     quick_links_per_article = []
 
     for u in urls:
@@ -126,21 +137,20 @@ if submit:
             domain = get_root_domain(u)
             domains.append(domain)
 
-            # Related articles from same domain using title as query, excluding this article and any already used
-            related_links = get_related_articles(title, domain, all_used_urls, count=2)
-            # If not enough related, fill with latest from site (never repeats)
+            # Extract keywords for better relevance
+            keywords_query = extract_keywords(title)
+            related_links = get_related_articles(keywords_query, domain, all_used_urls, count=2)
             if len(related_links) < 2:
                 needed = 2 - len(related_links)
                 fallback_links = get_latest_articles(domain, all_used_urls.union({l for _, l in related_links}), count=needed)
                 related_links.extend(fallback_links)
-            # Add these quick links to the set of all used URLs
             for _, link_url in related_links:
                 all_used_urls.add(link_url)
             quick_links_per_article.append(set(link_url for _, link_url in related_links))
 
-            # Format quick links as Markdown
+            # Format quick links as Markdown (one per line, no <br>)
             if related_links:
-                quick_links_md = "<br>".join([f"[{t}]({l})" for t, l in related_links])
+                quick_links_md = "\n".join([f"- [{t}]({l})" for t, l in related_links])
             else:
                 quick_links_md = "(No related articles found on this site.)"
 
@@ -152,7 +162,7 @@ if submit:
             <p>{summary}</p>
             <p><a href="{u}" target="_blank"><b>Continue Reading →</b></a></p>
             <div style="margin-top:10px; padding:10px; background-color:#f0f4f8; border-left:4px solid #1e88e5;">
-                <b>Quick Reads from this article:</b><br>
+                <b>Quick Reads from this article:</b>
                 {quick_links_md}
             </div>
             <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
@@ -173,13 +183,12 @@ if submit:
         try:
             from collections import Counter
             most_common_domain = Counter(domains).most_common(1)[0][0] if domains else None
-            # Exclude all main articles and all quick links already shown
             exclude_urls = set(urls)
             for quick_set in quick_links_per_article:
                 exclude_urls.update(quick_set)
             recommended_links = get_latest_articles(most_common_domain, exclude_urls, count=3)
             if recommended_links:
                 st.markdown("<h3>🔗 Recommended Reads</h3>", unsafe_allow_html=True)
-                st.markdown("<br>".join([f"[{t}]({l})" for t, l in recommended_links]), unsafe_allow_html=True)
+                st.markdown("\n".join([f"- [{t}]({l})" for t, l in recommended_links]), unsafe_allow_html=True)
         except Exception as e:
             st.error(f"Failed to fetch recommended reads: {e}")
