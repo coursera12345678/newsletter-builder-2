@@ -1,194 +1,89 @@
-import streamlit as st
 import requests
-from bs4 import BeautifulSoup
+import streamlit as st
 from urllib.parse import urlparse
-from groq import Groq
 import re
 
-client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-
-def fetch_article_content(url):
-    try:
-        res = requests.get(url)
-        soup = BeautifulSoup(res.text, "html.parser")
-        paragraphs = soup.find_all("p")
-        return "\n".join(p.text for p in paragraphs)
-    except Exception as e:
-        return f"Failed to fetch article: {e}"
-
-def summarize_article(content, title):
-    prompt = f"""
-    Summarize the following article titled '{title}' in a concise and engaging tone. Do not start with 'Here is a summary...'. Limit it to about 5-6 crisp sentences:
-    {content}
-    """
-    try:
-        completion = client.chat.completions.create(
-            model="llama3-70b-8192",
-            messages=[
-                {"role": "user", "content": prompt}
-            ]
-        )
-        return completion.choices[0].message.content.strip()
-    except Exception as e:
-        return f"Summary failed: {e}"
-
-def extract_image(soup):
-    og_img = soup.find("meta", property="og:image")
-    return og_img["content"] if og_img else None
+GNEWS_API_KEY = "YOUR_GNEWS_API_KEY" 
 
 def get_root_domain(url):
     netloc = urlparse(url).netloc
     parts = netloc.split('.')
-    if len(parts) >= 2:
-        return '.'.join(parts[-2:])
-    return netloc
+    return '.'.join(parts[-2:]) if len(parts) >= 2 else netloc
 
 def extract_keywords(title, max_keywords=4):
-    # Remove punctuation, split, filter out short/common words, pick the longest/most unique words
     stopwords = set([
-        "the", "and", "for", "but", "with", "from", "this", "that", "have", "has", "will", "are", "was", "its", "his", "her", "their", "our", "your", "about", "into", "over", "plus", "just", "more", "than", "now", "out", "new", "all", "can", "see", "get", "got", "off", "on", "in", "to", "of", "by", "as", "at", "is", "it", "be", "or", "an", "a", "so", "up", "back", "for", "not", "you", "we", "he", "she", "they", "his", "her", "our", "their", "your", "my", "me", "i"
+        "the", "and", "for", "but", "with", "from", "this", "that", "have", "has", "will", "are",
+        "was", "its", "his", "her", "their", "our", "your", "about", "into", "over", "plus", "just",
+        "more", "than", "now", "out", "new", "all", "can", "see", "get", "got", "off", "on", "in",
+        "to", "of", "by", "as", "at", "is", "it", "be", "or", "an", "a", "so", "up", "back", "for",
+        "not", "you", "we", "he", "she", "they", "his", "her", "our", "their", "your", "my", "me", "i"
     ])
     words = re.findall(r'\b\w+\b', title.lower())
     keywords = [w for w in words if w not in stopwords and len(w) > 3]
     keywords = sorted(keywords, key=len, reverse=True)
     return " ".join(keywords[:max_keywords]) if keywords else title
 
-def get_related_articles(query, domain, exclude_urls, count=2):
-    api_key = st.secrets["NEWSAPI_KEY"]
-    endpoint = "https://newsapi.org/v2/everything"
+def gnews_search(query, domain, exclude_urls=None, max_results=5):
+    url = f"https://gnews.io/api/v4/search"
     params = {
         "q": query,
-        "domains": domain,
-        "language": "en",
-        "sortBy": "relevancy",
-        "pageSize": 10,
-        "apiKey": api_key
+        "token": GNEWS_API_KEY,
+        "lang": "en",
+        "max": max_results,
+        "site": domain
     }
-    try:
-        response = requests.get(endpoint, params=params, timeout=8)
-        if response.status_code == 200:
-            results = response.json().get("articles", [])
-            links = []
-            for item in results:
-                if item['url'] not in exclude_urls:
-                    links.append((item['title'], item['url']))
-                if len(links) >= count:
-                    break
-            return links
-        else:
-            return []
-    except Exception:
-        return []
+    resp = requests.get(url, params=params)
+    results = []
+    if resp.status_code == 200:
+        data = resp.json()
+        for article in data.get("articles", []):
+            if exclude_urls and article["url"] in exclude_urls:
+                continue
+            results.append((article["title"], article["url"]))
+    return results
 
-def get_latest_articles(domain, exclude_urls, count=3):
-    api_key = st.secrets["NEWSAPI_KEY"]
-    endpoint = "https://newsapi.org/v2/everything"
+def gnews_latest(domain, exclude_urls=None, max_results=5):
+    url = f"https://gnews.io/api/v4/top-headlines"
     params = {
-        "domains": domain,
-        "language": "en",
-        "sortBy": "publishedAt",
-        "pageSize": 10,
-        "apiKey": api_key
+        "token": GNEWS_API_KEY,
+        "lang": "en",
+        "max": max_results,
+        "site": domain
     }
-    try:
-        response = requests.get(endpoint, params=params, timeout=8)
-        if response.status_code == 200:
-            results = response.json().get("articles", [])
-            links = []
-            for item in results:
-                if item['url'] not in exclude_urls:
-                    links.append((item['title'], item['url']))
-                if len(links) >= count:
-                    break
-            return links
-        else:
-            return []
-    except Exception:
-        return []
+    resp = requests.get(url, params=params)
+    results = []
+    if resp.status_code == 200:
+        data = resp.json()
+        for article in data.get("articles", []):
+            if exclude_urls and article["url"] in exclude_urls:
+                continue
+            results.append((article["title"], article["url"]))
+    return results
 
-def generate_intro(headlines):
-    joined = ", ".join(headlines)
-    return f"Hi there! This week’s newsletter covers: {joined}. Dive in below!"
+# Example usage in your Streamlit app:
+def show_quick_and_recommended(main_url, main_title, all_used_urls):
+    domain = get_root_domain(main_url)
+    keywords = extract_keywords(main_title)
+    # Quick Reads: related by keywords, from same site, not main article
+    quick_links = gnews_search(keywords, domain, exclude_urls=all_used_urls | {main_url}, max_results=3)
+    for _, url in quick_links:
+        all_used_urls.add(url)
+    # Recommended Reads: latest from same site, not already used
+    recommended_links = gnews_latest(domain, exclude_urls=all_used_urls | {main_url}, max_results=3)
+    for _, url in recommended_links:
+        all_used_urls.add(url)
+    # Format as Markdown
+    quick_md = "\n".join([f"- [{t}]({l})" for t, l in quick_links]) if quick_links else "(No related articles found.)"
+    recommended_md = "\n".join([f"- [{t}]({l})" for t, l in recommended_links]) if recommended_links else "(No more articles found.)"
+    return quick_md, recommended_md
 
-st.set_page_config(page_title="📰 Advanced Tech Newsletter Generator")
-st.title("📰 Advanced Tech Newsletter Generator")
+# Example for a single article:
+main_url = "https://www.theverge.com/news/696877/xbox-perfect-dark-everwild-cancelled-the-initiative-layoffs"
+main_title = "Microsoft cancels its Perfect Dark and Everwild Xbox games | The Verge"
+all_used_urls = set([main_url])
+quick_md, recommended_md = show_quick_and_recommended(main_url, main_title, all_used_urls)
 
-st.markdown("Paste your article URLs (one per line), then click Generate.")
-urls_input = st.text_area("Input URLs")
-submit = st.button("Generate Newsletter")
-
-if submit:
-    urls = [u.strip() for u in urls_input.split("\n") if u.strip()]
-    headlines = []
-    sections = []
-    domains = []
-    all_used_urls = set(urls)
-    quick_links_per_article = []
-
-    for u in urls:
-        try:
-            st.markdown(f"🔍 Fetching: {u}")
-            res = requests.get(u)
-            soup = BeautifulSoup(res.text, "html.parser")
-            title = soup.find("title").text.strip()
-            content = "\n".join(p.text for p in soup.find_all("p"))
-            summary = summarize_article(content, title)
-            image_url = extract_image(soup)
-            domain = get_root_domain(u)
-            domains.append(domain)
-
-            # Extract keywords for better relevance
-            keywords_query = extract_keywords(title)
-            related_links = get_related_articles(keywords_query, domain, all_used_urls, count=2)
-            if len(related_links) < 2:
-                needed = 2 - len(related_links)
-                fallback_links = get_latest_articles(domain, all_used_urls.union({l for _, l in related_links}), count=needed)
-                related_links.extend(fallback_links)
-            for _, link_url in related_links:
-                all_used_urls.add(link_url)
-            quick_links_per_article.append(set(link_url for _, link_url in related_links))
-
-            # Format quick links as Markdown (one per line, no <br>)
-            if related_links:
-                quick_links_md = "\n".join([f"- [{t}]({l})" for t, l in related_links])
-            else:
-                quick_links_md = "(No related articles found on this site.)"
-
-            headlines.append(title)
-
-            section = f"""
-            <h2>{title}</h2>
-            <img src="{image_url}" style="width:100%; border-radius: 12px;"/>
-            <p>{summary}</p>
-            <p><a href="{u}" target="_blank"><b>Continue Reading →</b></a></p>
-            <div style="margin-top:10px; padding:10px; background-color:#f0f4f8; border-left:4px solid #1e88e5;">
-                <b>Quick Reads from this article:</b>
-                {quick_links_md}
-            </div>
-            <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
-            """
-            sections.append(section)
-
-        except Exception as e:
-            st.error(f"Failed to process {u}: {e}")
-
-    if sections:
-        intro = generate_intro(headlines)
-        st.markdown("## ✨ Newsletter Preview:")
-        st.markdown(f"<p>{intro}</p>", unsafe_allow_html=True)
-        for s in sections:
-            st.markdown(s, unsafe_allow_html=True)
-
-        # Final recommended section: show latest stories from the most common domain, excluding all previously shown links
-        try:
-            from collections import Counter
-            most_common_domain = Counter(domains).most_common(1)[0][0] if domains else None
-            exclude_urls = set(urls)
-            for quick_set in quick_links_per_article:
-                exclude_urls.update(quick_set)
-            recommended_links = get_latest_articles(most_common_domain, exclude_urls, count=3)
-            if recommended_links:
-                st.markdown("<h3>🔗 Recommended Reads</h3>", unsafe_allow_html=True)
-                st.markdown("\n".join([f"- [{t}]({l})" for t, l in recommended_links]), unsafe_allow_html=True)
-        except Exception as e:
-            st.error(f"Failed to fetch recommended reads: {e}")
+st.markdown("**Quick Reads from this article:**")
+st.markdown(quick_md)
+st.markdown("**Recommended Reads:**")
+st.markdown(recommended_md)
