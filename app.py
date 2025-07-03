@@ -50,7 +50,7 @@ def get_related_articles(query, domain, exclude_urls, count=2):
         "domains": domain,
         "language": "en",
         "sortBy": "relevancy",
-        "pageSize": 5,
+        "pageSize": 10,  # Fetch more for filtering
         "apiKey": api_key
     }
     try:
@@ -76,7 +76,7 @@ def get_latest_articles(domain, exclude_urls, count=3):
         "domains": domain,
         "language": "en",
         "sortBy": "publishedAt",
-        "pageSize": max(10, count),
+        "pageSize": 10,
         "apiKey": api_key
     }
     try:
@@ -111,7 +111,7 @@ if submit:
     headlines = []
     sections = []
     domains = []
-    all_used_urls = set(urls)  # To avoid any repeats
+    all_used_urls = set(urls)  # To avoid any repeats (main articles)
     quick_links_per_article = []
 
     for u in urls:
@@ -135,9 +135,13 @@ if submit:
 
             # Format quick links as Markdown
             if related_links:
-                quick_links_md = "<br>".join(f"[{t}]({l})" for t, l in related_links)
+                quick_links_md = "<br>".join([f"[{t}]({l})" for t, l in related_links])
             else:
-                quick_links_md = "(No related articles found on this site.)"
+                # Fallback: show latest articles from the site (never repeats)
+                fallback_links = get_latest_articles(domain, all_used_urls, count=2)
+                for _, link_url in fallback_links:
+                    all_used_urls.add(link_url)
+                quick_links_md = "<br>".join([f"[{t}]({l})" for t, l in fallback_links]) if fallback_links else "(No related articles found on this site.)"
 
             headlines.append(title)
 
@@ -175,6 +179,6 @@ if submit:
             recommended_links = get_latest_articles(most_common_domain, exclude_urls, count=3)
             if recommended_links:
                 st.markdown("<h3>🔗 Recommended Reads</h3>", unsafe_allow_html=True)
-                st.markdown("<br>".join(f"[{t}]({l})" for t, l in recommended_links), unsafe_allow_html=True)
+                st.markdown("<br>".join([f"[{t}]({l})" for t, l in recommended_links]), unsafe_allow_html=True)
         except Exception as e:
             st.error(f"Failed to fetch recommended reads: {e}")
