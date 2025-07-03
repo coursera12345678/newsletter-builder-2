@@ -5,7 +5,6 @@ from bs4 import BeautifulSoup
 import re
 from groq import Groq
 
-# Load API keys from .streamlit/secrets.toml
 BRAVE_API_KEY = st.secrets["BRAVE_API_KEY"]
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 client = Groq(api_key=GROQ_API_KEY)
@@ -147,11 +146,11 @@ submit = st.button("Generate Newsletter")
 
 if submit:
     urls = [u.strip() for u in urls_input.split("\n") if u.strip()]
-    all_used_urls = set(urls)
+    all_main_urls = set(urls)
     domains = []
     headlines = []
     article_data = []
-    all_quick_links_urls = set()  # For deduplication in recommendations only
+    all_quick_links_urls = set()
 
     for u in urls:
         try:
@@ -192,23 +191,21 @@ if submit:
         domain = data["domain"]
         keywords = data["keywords"]
 
-        # Quick Reads: deduplicate only within this article (never globally)
+        # Quick Reads: deduplicate only against this article's URL
         quick_links = brave_search(
             " ".join(keywords),
             domain,
             exclude_urls={u},
             max_results=8
         )
-        # Only keep up to 3, and avoid duplicates within this article's quick links
-        seen_quick = set()
         filtered_quick_links = []
+        seen_quick = set()
         for link in quick_links:
             if link["url"] not in seen_quick and link["url"] != u:
                 filtered_quick_links.append(link)
                 seen_quick.add(link["url"])
             if len(filtered_quick_links) == 3:
                 break
-        # Add to the global set for rec deduplication
         all_quick_links_urls.update([l["url"] for l in filtered_quick_links])
 
         st.markdown(f"## {title}")
@@ -226,16 +223,14 @@ if submit:
 
         st.markdown("---")
 
-    # After all quick links, update all_used_urls to prevent overlap with recommendations
-    all_used_urls.update(all_quick_links_urls)
-
-    # Recommended Reads: escalate aggressively
+    # Recommendations: exclude all main article and quick link URLs
+    exclude_for_recs = all_main_urls | all_quick_links_urls
     from collections import Counter
     most_common_domain = Counter(domains).most_common(1)[0][0] if domains else None
     recommended_links = []
 
     # 1. Try recent from same domain
-    recommended_links += brave_search("", most_common_domain, exclude_urls=all_used_urls, max_results=20)
+    recommended_links += brave_search("", most_common_domain, exclude_urls=exclude_for_recs, max_results=20)
 
     # 2. If not enough, try synonyms of all main keywords
     if len(recommended_links) < 3:
@@ -246,21 +241,21 @@ if submit:
         for syn in synonyms:
             if len(recommended_links) >= 9:
                 break
-            recommended_links += brave_search(syn, most_common_domain, exclude_urls=all_used_urls | {l['url'] for l in recommended_links}, max_results=4)
+            recommended_links += brave_search(syn, most_common_domain, exclude_urls=exclude_for_recs | {l['url'] for l in recommended_links}, max_results=4)
 
     # 3. If STILL not enough, drop domain restriction for latest tech news
     if len(recommended_links) < 3:
-        recommended_links += brave_search("technology", None, exclude_urls=all_used_urls | {l['url'] for l in recommended_links}, max_results=20)
+        recommended_links += brave_search("technology", None, exclude_urls=exclude_for_recs | {l['url'] for l in recommended_links}, max_results=20)
 
     # 4. As a last resort, just fetch any recent articles
     if len(recommended_links) < 3:
-        recommended_links += brave_search("", None, exclude_urls=all_used_urls | {l['url'] for l in recommended_links}, max_results=20)
+        recommended_links += brave_search("", None, exclude_urls=exclude_for_recs | {l['url'] for l in recommended_links}, max_results=20)
 
     # Deduplicate and keep only 3
     seen = set()
     final_recommended = []
     for link in recommended_links:
-        if link["url"] not in seen and link["url"] not in all_used_urls:
+        if link["url"] not in seen and link["url"] not in exclude_for_recs:
             final_recommended.append(link)
             seen.add(link["url"])
         if len(final_recommended) == 3:
