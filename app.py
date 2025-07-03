@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 import re
 from groq import Groq
 
+# Load API keys from .streamlit/secrets.toml
 BRAVE_API_KEY = st.secrets["BRAVE_API_KEY"]
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 client = Groq(api_key=GROQ_API_KEY)
@@ -172,9 +173,13 @@ if submit:
             "keywords": keywords
         })
 
-    # Generate and display the intro
+    # Generate and display the intro in small paragraph text
     intro_text = generate_intro(headlines)
-    st.markdown(f"### {intro_text}\n---")
+    st.markdown(f'<p style="font-size:0.95em;">{intro_text}</p>', unsafe_allow_html=True)
+    st.markdown("---")
+
+    # For deduplication
+    quick_used_urls = set()
 
     for data in article_data:
         u = data["url"]
@@ -184,10 +189,11 @@ if submit:
         domain = data["domain"]
         keywords = data["keywords"]
 
-        quick_links = brave_search(" ".join(keywords), domain, exclude_urls=all_used_urls | {u}, max_results=8)
+        # Quick Reads: related by keywords, from same site, not main article
+        quick_links = brave_search(" ".join(keywords), domain, exclude_urls=quick_used_urls | {u}, max_results=8)
         quick_links = quick_links[:3]
         for link in quick_links:
-            all_used_urls.add(link["url"])
+            quick_used_urls.add(link["url"])
 
         st.markdown(f"## {title}")
         if image_url:
@@ -203,6 +209,9 @@ if submit:
             st.markdown("_No related articles found._")
 
         st.markdown("---")
+
+    # After all quick links, update all_used_urls to prevent overlap with recommendations
+    all_used_urls.update(quick_used_urls)
 
     # Recommended Reads: escalate aggressively
     from collections import Counter
