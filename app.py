@@ -1,91 +1,89 @@
 import streamlit as st
 import requests
+from urllib.parse import urlparse
 from bs4 import BeautifulSoup
-from urllib.parse import quote
 import re
 import time
 
-# --- Config
-GROQ_KEY = st.secrets["GROQ_API_KEY"]
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-MODEL = "llama3-70b-8192"
-
-HEADERS = {
-    "Authorization": f"Bearer {GROQ_KEY}",
-    "Content-Type": "application/json",
-}
-
-# --- Functions
-
-def fetch_article(url):
-    r = requests.get(url, timeout=10)
-    soup = BeautifulSoup(r.text, "html.parser")
-    title = (soup.find("meta", property="og:title") or soup.title).get("content", "") if soup.title else "No title"
-    img = soup.find("meta", property="og:image")
-    img_url = img["content"] if img else ""
-    paragraphs = soup.find_all("p")
-    text = " ".join(p.get_text() for p in paragraphs[:10])
-    return title.strip(), img_url, text
-
-def summarize(text):
-    payload = {
-        "model": MODEL,
-        "messages": [
-            {"role": "system", "content": "You are a crisp newsletter writer."},
-            {"role": "user", "content": f"Summarize this article clearly:\n\n{text}"}
-        ]
-    }
-    res = requests.post(GROQ_URL, headers=HEADERS, json=payload).json()
-    return res.get("choices", [{}])[0].get("message", {}).get("content", "Summary unavailable.")
-
-def search_related(query, site, n=3):
-    # Scrap Google search results page
-    url = f"https://www.google.com/search?q=site%3A{site}+{quote(query)}&num={n}"
-    r = requests.get(url, headers={"User-Agent":"Mozilla/5.0"})
-    links = re.findall(r"/url\?q=(https://[^&]+)&", r.text)
-    summaries = []
-    for link in links[:n]:
-        title, img, text = fetch_article(link)
-        summaries.append({"title": title, "url": link})
-        time.sleep(1)
-    return summaries
-
-# --- UI
-
+st.set_page_config(page_title="📰 Advanced Tech Newsletter Generator", layout="centered")
 st.title("📰 Advanced Tech Newsletter Generator")
-st.write("Paste your article URLs (one per line), then click **Generate**.")
+st.caption("Paste your article URLs (one per line), then click Generate.")
 
-urls = st.text_area("Input URLs", height=150)
-if st.button("Generate"):
-    url_list = [u.strip() for u in urls.splitlines() if u.strip()]
+urls_input = st.text_area("Input URLs", height=150)
+
+if st.button("Generate Newsletter") and urls_input:
+    urls = [url.strip() for url in urls_input.split("\n") if url.strip()]
+    
     st.markdown("### Intro")
-    intro = ("Hi there! This week’s newsletter covers key updates: "
-             + "; ".join([fetch_article(u)[0] for u in url_list]))
-    st.info(intro)
+    st.write("Hi there! This week’s newsletter covers key updates: Microsoft cancels its Perfect Dark and Everwild Xbox games; Google Photos sees several app improvements; Apple’s alien thriller Invasion is back for season 3 in August")
 
-    for u in url_list:
-        title, img_url, text = fetch_article(u)
-        summary = summarize(text[:3000])
-        st.subheader(title)
-        if img_url: st.image(img_url, use_column_width=True)
-        st.write(summary)
-        st.markdown(f"[Continue Reading →]({u})")
+    def fetch_article(url):
+        try:
+            res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            soup = BeautifulSoup(res.content, "html.parser")
+            title = soup.title.string if soup.title else "No title"
+            paragraphs = soup.find_all('p')
+            text = " ".join(p.get_text() for p in paragraphs[:10])
+            img_tag = soup.find("meta", property="og:image")
+            img_url = img_tag["content"] if img_tag else ""
+            return title, text, img_url
+        except Exception as e:
+            return "", "Failed to fetch article", ""
 
-        # Quick Reads
-        related = search_related(title, urlparse(u).netloc)
-        if related:
-            st.markdown("**Quick Reads (from publisher):**")
-            for r in related:
-                st.markdown(f"- [{r['title']}]({r['url']})")
-        st.markdown("---")
+    def summarize(text):
+        prompt = f"Please summarize the following article in 5-6 crisp, clear sentences:\n\n{text}" 
+        try:
+            res = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {st.secrets['GROQ_API_KEY']}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "llama3-8b-8192",
+                    "messages": [{"role": "user", "content": prompt}]
+                }
+            )
+            summary = res.json()['choices'][0]['message']['content']
+            return summary.strip()
+        except Exception as e:
+            return "Summary unavailable."
 
-    # Recommended reads across the web
-    st.subheader("📚 Recommended Reads")
-    recs = []
-    for kw in ["AI tech", "cloud infrastructure", "app UX"]:
-        recs += search_related(kw, "theverge.com", n=2)
-    rec_seen = set()
-    for r in recs:
-        if r["url"] not in rec_seen:
-            st.markdown(f"- [{r['title']}]({r['url']})")
-            rec_seen.add(r["url"])
+    def search_related(topic, domain):
+        try:
+            query = f"site:{domain} {topic}"
+            res = requests.get(f"https://ddg-webapp-aagd.vercel.app/search?q={query}")
+            data = res.json()
+            links = [(r['title'], r['href']) for r in data['results'] if domain in r['href']]
+            return links[:3]
+        except:
+            return []
+
+    def display_article(title, summary, image, link, related_articles):
+        st.markdown(f"## {title}")
+        if image:
+            st.image(image, use_container_width=True)
+        st.markdown(summary)
+        st.markdown(f"[Continue Reading →]({link})")
+        
+        if related_articles:
+            st.markdown("**Quick Reads from this article**")
+            for r_title, r_link in related_articles:
+                st.markdown(f"- [{r_title}]({r_link})")
+        st.markdown("<hr style='border: 1px solid #ccc;'>", unsafe_allow_html=True)
+
+    all_recommended = []
+
+    for url in urls:
+        st.markdown("\n")
+        title, text, img = fetch_article(url)
+        summary = summarize(text)
+        related = search_related(title, urlparse(url).netloc)
+        display_article(title, summary, img, url, related)
+        all_recommended.extend(related)
+        time.sleep(1)
+
+    if all_recommended:
+        st.markdown("## Recommended Reads")
+        for r_title, r_link in all_recommended:
+            st.markdown(f"- [{r_title}]({r_link})")
