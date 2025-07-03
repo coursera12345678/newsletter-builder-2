@@ -3,3 +3,4 @@ requests
 beautifulsoup4
 openai
 newspaper3k
+lxml
