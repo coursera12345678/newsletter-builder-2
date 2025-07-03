@@ -128,6 +128,11 @@ if submit:
 
             # Related articles from same domain using title as query, excluding this article and any already used
             related_links = get_related_articles(title, domain, all_used_urls, count=2)
+            # If not enough related, fill with latest from site (never repeats)
+            if len(related_links) < 2:
+                needed = 2 - len(related_links)
+                fallback_links = get_latest_articles(domain, all_used_urls.union({l for _, l in related_links}), count=needed)
+                related_links.extend(fallback_links)
             # Add these quick links to the set of all used URLs
             for _, link_url in related_links:
                 all_used_urls.add(link_url)
@@ -137,11 +142,7 @@ if submit:
             if related_links:
                 quick_links_md = "<br>".join([f"[{t}]({l})" for t, l in related_links])
             else:
-                # Fallback: show latest articles from the site (never repeats)
-                fallback_links = get_latest_articles(domain, all_used_urls, count=2)
-                for _, link_url in fallback_links:
-                    all_used_urls.add(link_url)
-                quick_links_md = "<br>".join([f"[{t}]({l})" for t, l in fallback_links]) if fallback_links else "(No related articles found on this site.)"
+                quick_links_md = "(No related articles found on this site.)"
 
             headlines.append(title)
 
